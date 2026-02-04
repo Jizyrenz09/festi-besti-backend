@@ -3,18 +3,15 @@ const crypto = require("crypto");
 const express = require("express");
 const cors = require("cors");
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
-const { TransactionalEmailsApi, SendSmtpEmail } = require("@getbrevo/brevo");
-
-// Initialize Brevo client
 const { TransactionalEmailsApi, SendSmtpEmail, Configuration } = require("@getbrevo/brevo");
 
+// Initialize Brevo client
 const brevoClient = new TransactionalEmailsApi(
   new Configuration({ apiKey: process.env.BREVO_API_KEY })
 );
 
-
-
 const app = express();
+
 
 /* ======================
    SERVICE STATUS + TEST EMAIL
