@@ -3,9 +3,9 @@ const crypto = require("crypto");
 const express = require("express");
 const cors = require("cors");
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
-const { TransactionalEmailsApi, SendSmtpEmail, Configuration } = require("@getbrevo/brevo");
+const { TransactionalEmailsApi, Configuration } = require("@getbrevo/brevo");
 
-// Initialize Brevo client
+// Initialize Brevo client correctly
 const brevoClient = new TransactionalEmailsApi(
   new Configuration({ apiKey: process.env.BREVO_API_KEY })
 );
@@ -57,26 +57,48 @@ app.use(express.urlencoded({ extended: true }));
 
 
 
+
+
+
+
+
+
+
+
+
+
 /* ======================
    TEST EMAIL ENDPOINT
 ====================== */
 app.get("/test-email", async (req, res) => {
   try {
-    const response = await brevoClient.sendTransacEmail(
-      new SendSmtpEmail({
-        sender: { email: process.env.BREVO_SENDER, name: "Festi Besti" },
-        to: [{ email: process.env.ADMIN_EMAIL, name: "Admin" }],
-        subject: "Test Email from Render",
-        htmlContent: "<p>If you see this, emails are working ✅</p>",
-      })
-    );
-    console.log("Test email response:", response);
+    const emailData = {
+      sender: { email: process.env.BREVO_SENDER, name: "Festi Besti" },
+      to: [{ email: process.env.ADMIN_EMAIL, name: "Admin" }],
+      subject: "Test Email from Render",
+      htmlContent: "<p>If you see this, emails are working ✅</p>",
+    };
+
+    const response = await brevoClient.sendTransacEmail(emailData);
+    console.log("✅ Test email response:", response);
     res.send("✅ Test email sent. Check your inbox.");
   } catch (err) {
-    console.error("❌ Test email failed:", err);
+    console.error("❌ Test email failed:", err.response ? err.response.body : err.message);
     res.status(500).send("❌ Test email failed: " + err.message);
   }
 });
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -129,57 +151,76 @@ app.post("/create-payment-intent", async (req, res) => {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
 /* ======================
-   HANDLE SUCCESSFUL PAYMENT (IMPROVED)
+   HANDLE SUCCESSFUL PAYMENT (FIXED FOR BREVO)
 ====================== */
 async function handleSuccessfulPayment(paymentIntent) {
   try {
+    // Parse order and customer info from Stripe metadata
     const order = JSON.parse(paymentIntent.metadata.order || "{}");
     const customer = JSON.parse(paymentIntent.metadata.customer || "{}");
 
     const customerEmail = customer.email;
 
-    // === Send to customer ===
+    // === Send email to customer ===
     try {
-      const customerResponse = await brevoClient.sendTransacEmail(
-        new SendSmtpEmail({
-          sender: {
-            email: process.env.BREVO_SENDER,
-            name: "Festi Besti",
-          },
-          to: [{ email: customerEmail, name: customer.name }],
-          subject: "Payment Received – Your Rental Invoice",
-          htmlContent: customerEmailTemplate(paymentIntent, order, customer),
-        })
-      );
+      const customerResponse = await brevoClient.sendTransacEmail({
+        sender: { email: process.env.BREVO_SENDER, name: "Festi Besti" },
+        to: [{ email: customerEmail, name: customer.name }],
+        subject: "Payment Received – Your Rental Invoice",
+        htmlContent: customerEmailTemplate(paymentIntent, order, customer),
+      });
       console.log("✅ Customer email sent successfully:", customerResponse);
     } catch (err) {
-      console.error("❌ Customer email failed:", err.response ? err.response.body : err.message);
+      console.error(
+        "❌ Customer email failed:",
+        err.response ? err.response.body : err.message
+      );
     }
 
-    // === Send to admin ===
+    // === Send email to admin ===
     try {
-      const adminResponse = await brevoClient.sendTransacEmail(
-        new SendSmtpEmail({
-          sender: {
-            email: process.env.BREVO_SENDER,
-            name: "Festi Besti",
-          },
-          to: [{ email: process.env.ADMIN_EMAIL }],
-          subject: "New Paid Order Received",
-          htmlContent: adminEmailTemplate(paymentIntent, order, customer),
-        })
-      );
+      const adminResponse = await brevoClient.sendTransacEmail({
+        sender: { email: process.env.BREVO_SENDER, name: "Festi Besti" },
+        to: [{ email: process.env.ADMIN_EMAIL, name: "Admin" }],
+        subject: "New Paid Order Received",
+        htmlContent: adminEmailTemplate(paymentIntent, order, customer),
+      });
       console.log("✅ Admin email sent successfully:", adminResponse);
     } catch (err) {
-      console.error("❌ Admin email failed:", err.response ? err.response.body : err.message);
+      console.error(
+        "❌ Admin email failed:",
+        err.response ? err.response.body : err.message
+      );
     }
 
     console.log(`🚀 Payment processed: ${paymentIntent.id}`);
   } catch (err) {
-    console.error("❌ Unexpected error in handleSuccessfulPayment:", err.message);
+    console.error(
+      "❌ Unexpected error in handleSuccessfulPayment:",
+      err.message
+    );
   }
 }
+
+
+
+
+
+
+
+
 
 
 
