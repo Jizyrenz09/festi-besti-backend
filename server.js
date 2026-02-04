@@ -6,10 +6,11 @@ const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const { TransactionalEmailsApi, SendSmtpEmail } = require("@getbrevo/brevo");
 
 // Initialize Brevo client
-const brevoClient = new TransactionalEmailsApi();
-brevoClient.authentications = {
-  apiKey: process.env.BREVO_API_KEY,
-};
+const { TransactionalEmailsApi, SendSmtpEmail, Configuration } = require("@getbrevo/brevo");
+
+const brevoClient = new TransactionalEmailsApi(
+  new Configuration({ apiKey: process.env.BREVO_API_KEY })
+);
 
 
 
