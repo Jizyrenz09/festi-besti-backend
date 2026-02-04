@@ -3,12 +3,14 @@ const crypto = require("crypto");
 const express = require("express");
 const cors = require("cors");
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
-const { TransactionalEmailsApi, Configuration } = require("@getbrevo/brevo");
+  
+const { TransactionalEmailsApi, Configuration, SendSmtpEmail } = require("@getbrevo/brevo");
 
-// Initialize Brevo client correctly
+// Initialize Brevo client
 const brevoClient = new TransactionalEmailsApi(
   new Configuration({ apiKey: process.env.BREVO_API_KEY })
 );
+
 
 const app = express();
 
@@ -66,20 +68,19 @@ app.use(express.urlencoded({ extended: true }));
 
 
 
-
 /* ======================
-   TEST EMAIL ENDPOINT
+   TEST EMAIL ENDPOINT (FIXED)
 ====================== */
 app.get("/test-email", async (req, res) => {
   try {
-    const emailData = {
+    const email = new SendSmtpEmail({
       sender: { email: process.env.BREVO_SENDER, name: "Festi Besti" },
       to: [{ email: process.env.ADMIN_EMAIL, name: "Admin" }],
       subject: "Test Email from Render",
       htmlContent: "<p>If you see this, emails are working ✅</p>",
-    };
+    });
 
-    const response = await brevoClient.sendTransacEmail(emailData);
+    const response = await brevoClient.sendTransacEmail(email);
     console.log("✅ Test email response:", response);
     res.send("✅ Test email sent. Check your inbox.");
   } catch (err) {
@@ -87,9 +88,6 @@ app.get("/test-email", async (req, res) => {
     res.status(500).send("❌ Test email failed: " + err.message);
   }
 });
-
-
-
 
 
 
@@ -161,60 +159,50 @@ app.post("/create-payment-intent", async (req, res) => {
 
 
 
-
 /* ======================
-   HANDLE SUCCESSFUL PAYMENT (FIXED FOR BREVO)
+   HANDLE SUCCESSFUL PAYMENT (FIXED)
 ====================== */
 async function handleSuccessfulPayment(paymentIntent) {
   try {
-    // Parse order and customer info from Stripe metadata
     const order = JSON.parse(paymentIntent.metadata.order || "{}");
     const customer = JSON.parse(paymentIntent.metadata.customer || "{}");
-
     const customerEmail = customer.email;
 
-    // === Send email to customer ===
+    // === Send to customer ===
     try {
-      const customerResponse = await brevoClient.sendTransacEmail({
+      const emailCustomer = new SendSmtpEmail({
         sender: { email: process.env.BREVO_SENDER, name: "Festi Besti" },
         to: [{ email: customerEmail, name: customer.name }],
         subject: "Payment Received – Your Rental Invoice",
         htmlContent: customerEmailTemplate(paymentIntent, order, customer),
       });
+
+      const customerResponse = await brevoClient.sendTransacEmail(emailCustomer);
       console.log("✅ Customer email sent successfully:", customerResponse);
     } catch (err) {
-      console.error(
-        "❌ Customer email failed:",
-        err.response ? err.response.body : err.message
-      );
+      console.error("❌ Customer email failed:", err.response ? err.response.body : err.message);
     }
 
-    // === Send email to admin ===
+    // === Send to admin ===
     try {
-      const adminResponse = await brevoClient.sendTransacEmail({
+      const emailAdmin = new SendSmtpEmail({
         sender: { email: process.env.BREVO_SENDER, name: "Festi Besti" },
         to: [{ email: process.env.ADMIN_EMAIL, name: "Admin" }],
         subject: "New Paid Order Received",
         htmlContent: adminEmailTemplate(paymentIntent, order, customer),
       });
+
+      const adminResponse = await brevoClient.sendTransacEmail(emailAdmin);
       console.log("✅ Admin email sent successfully:", adminResponse);
     } catch (err) {
-      console.error(
-        "❌ Admin email failed:",
-        err.response ? err.response.body : err.message
-      );
+      console.error("❌ Admin email failed:", err.response ? err.response.body : err.message);
     }
 
     console.log(`🚀 Payment processed: ${paymentIntent.id}`);
   } catch (err) {
-    console.error(
-      "❌ Unexpected error in handleSuccessfulPayment:",
-      err.message
-    );
+    console.error("❌ Unexpected error in handleSuccessfulPayment:", err.message);
   }
 }
-
-
 
 
 
@@ -408,3 +396,4 @@ const PORT = process.env.PORT || 4242;
 app.listen(PORT, () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
 });
+
