@@ -3,18 +3,46 @@ const crypto = require("crypto");
 const express = require("express");
 const cors = require("cors");
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
-const Brevo = require("@getbrevo/brevo");
+
 
 const app = express();
 
 /* ======================
    BREVO INIT
 ====================== */
-const brevoClient = new Brevo.TransactionalEmailsApi();
-brevoClient.setApiKey(
-  Brevo.TransactionalEmailsApiApiKeys.apiKey,
-  process.env.BREVO_API_KEY
-);
+const axios = require("axios");
+
+async function sendBrevoEmail(payload) {
+  try {
+    const res = await axios.post(
+      "https://api.brevo.com/v3/smtp/email",
+      payload,
+      {
+        headers: {
+          "api-key": process.env.BREVO_API_KEY,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        timeout: 10_000,
+      }
+    );
+
+    console.log("✅ Brevo email sent:", res.data);
+    return res.data;
+  } catch (err) {
+    console.error("\n❌ BREVO AXIOS ERROR");
+    console.error("HTTP Status:", err.response?.status);
+    console.error("Response:", JSON.stringify(err.response?.data, null, 2));
+    console.error("Payload Sent:", JSON.stringify(payload, null, 2));
+    throw err;
+  }
+}
+
+
+
+
+
+
 
 /* ======================
    SERVICE STATUS
@@ -62,12 +90,6 @@ app.post("/webhook", express.raw({ type: "application/json" }), async (req, res)
 function logBrevoError(err, context = "Brevo") {
   console.error(`\n❌ ${context} ERROR`);
 
-  if (!err) {
-    console.error("Unknown error (no error object)");
-    return;
-  }
-
-  // Axios-style response from Brevo SDK
   const status = err?.response?.status;
   const body = err?.response?.body;
 
@@ -78,21 +100,10 @@ function logBrevoError(err, context = "Brevo") {
 
     const message = body.message || body.error || "";
 
-    if (status === 401) {
-      console.error("➡️  INVALID API KEY (401 Unauthorized)");
-    }
-
-    if (status === 403) {
-      console.error("➡️  UNAUTHORIZED / FORBIDDEN (403)");
-    }
-
-    if (message.includes("sender")) {
-      console.error("➡️  SENDER EMAIL NOT VERIFIED OR BLOCKED");
-    }
-
-    if (message.includes("not allowed")) {
-      console.error("➡️  RECIPIENT EMAIL NOT ALLOWED (Sandbox / Trial Mode)");
-    }
+    if (status === 401) console.error("➡️ INVALID API KEY");
+    if (status === 403) console.error("➡️ FORBIDDEN / PROJECT RESTRICTED");
+    if (message.includes("sender")) console.error("➡️ SENDER NOT VERIFIED");
+    if (message.includes("not allowed")) console.error("➡️ RECIPIENT NOT ALLOWED (SANDBOX)");
   } else {
     console.error("Error Message:", err.message);
   }
@@ -103,29 +114,33 @@ function logBrevoError(err, context = "Brevo") {
 }
 
 /* ======================
-   TEST EMAIL ENDPOINT
+   TEST EMAIL ENDPOINT (FIXED)
 ====================== */
 app.get("/test-email", async (req, res) => {
   try {
-    const email = new Brevo.SendSmtpEmail({
+    await sendBrevoEmail({
       sender: {
         email: process.env.BREVO_SENDER,
         name: "Festi Besti",
       },
-      to: [{ email: process.env.ADMIN_EMAIL, name: "Admin" }],
+      to: [
+        {
+          email: process.env.ADMIN_EMAIL,
+          name: "Admin",
+        },
+      ],
       subject: "Brevo Test Email",
       htmlContent: "<p>If you see this, Brevo is working ✅</p>",
     });
 
-    const response = await brevoClient.sendTransacEmail(email);
-    console.log("✅ Test email sent:", response);
-
     res.send("✅ Test email sent");
-  } catch (err) {
-    logBrevoError(err, "TEST EMAIL");
+  } catch {
     res.status(500).send("❌ Test email failed");
   }
 });
+
+
+
 
 /* ======================
    PAYMENT INTENT
@@ -165,46 +180,35 @@ app.post("/create-payment-intent", async (req, res) => {
 });
 
 /* ======================
-   SUCCESSFUL PAYMENT
+   SUCCESSFUL PAYMENT (FIXED)
 ====================== */
 async function handleSuccessfulPayment(paymentIntent) {
   try {
     const data = JSON.parse(paymentIntent.metadata.order || "{}");
     const customer = data.customer || {};
+    const order = data;
 
     const sender = { email: process.env.BREVO_SENDER, name: "Festi Besti" };
 
-    await brevoClient.sendTransacEmail(
-      new Brevo.SendSmtpEmail({
-        sender,
-        to: [{ email: customer.email }],
-        subject: "Payment Received",
-        htmlContent: "<p>Thank you for your order!</p>",
-      })
-    );
+    await brevoClient.sendTransacEmail({
+      sender,
+      to: [{ email: customer.email, name: customer.name }],
+      subject: "Payment Received – Your Rental Invoice",
+      htmlContent: customerEmailTemplate(paymentIntent, order, customer),
+    });
 
-    await brevoClient.sendTransacEmail(
-      new Brevo.SendSmtpEmail({
-        sender,
-        to: [{ email: process.env.ADMIN_EMAIL }],
-        subject: "New Paid Order",
-        htmlContent: "<p>New order received.</p>",
-      })
-    );
+    await brevoClient.sendTransacEmail({
+      sender,
+      to: [{ email: process.env.ADMIN_EMAIL, name: "Admin" }],
+      subject: "New Paid Order",
+      htmlContent: adminEmailTemplate(paymentIntent, order, customer),
+    });
 
     console.log(`✅ Emails sent for payment ${paymentIntent.id}`);
   } catch (err) {
     logBrevoError(err, "PAYMENT EMAIL");
   }
 }
-
-
-
-
-
-
-
-
 
 /* ====================== PRICING LOGIC ====================== */
 function calculateTotal(items, days) {
@@ -215,7 +219,6 @@ function calculateTotal(items, days) {
   return Math.max(total * 100, 0);
 }
 
-/* ====================== HELPER: Calculate price per item (daily rate or one-time) ====================== */
 function calculateItemPrice(item) {
   const pricing = {
     "Lightning Box": 35,
@@ -231,25 +234,18 @@ function calculateItemPrice(item) {
   if (key) price += pricing[key];
 
   if (lower.includes("delivery")) price += 6;
-  if (lower.includes("d20")) price += 20; // one-time
-  if (lower.includes("inquisitive")) price -= 10; // discount
+  if (lower.includes("d20")) price += 20;
+  if (lower.includes("inquisitive")) price -= 10;
 
   return price;
 }
 
-// Helper: returns 1 for one-time offers, or full rental days for daily items
 function getMultiplier(item, days) {
   const lower = item.toLowerCase();
-
-  if (
-    lower.includes("delivery") ||
-    lower.includes("d20") ||
-    lower.includes("inquisitive")
-  ) {
-    return 1; // one-time
+  if (lower.includes("delivery") || lower.includes("d20") || lower.includes("inquisitive")) {
+    return 1;
   }
-
-  return days; // per-day rental
+  return days;
 }
 
 
@@ -409,6 +405,7 @@ const PORT = process.env.PORT || 4242;
 app.listen(PORT, () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
 });
+
 
 
 
