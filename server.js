@@ -11,8 +11,26 @@ const app = express();
 /* ======================
    GLOBAL LOGS / CHECKERS
 ====================== */
-let lastWebhook = null;   // store last Stripe webhook event info
-let lastEmailLog = null;  // store last email sending info
+let lastWebhook = null;
+let lastEmailLog = null;
+
+/* ======================
+   PRICE CONFIG (SINGLE SOURCE OF TRUTH)
+====================== */
+const PRICE_CATALOG = {
+  "lightning-box": 35,
+  "winter-box": 25,
+  "sun-thieves": 30,
+  "snuggle-seat": 12,
+};
+
+const DISCOUNTS = {
+  MAP10: { type: "percent", value: 10 },
+  VIP50: { type: "flat", value: 50 },
+};
+
+const DELIVERY_FEE = 6;
+const MAX_DAYS = 30;
 
 /* ======================
    BREVO EMAIL SENDER
@@ -31,11 +49,13 @@ async function sendBrevoEmail(payload) {
         timeout: 10000,
       }
     );
+
     lastEmailLog = {
       time: new Date().toISOString(),
       subject: payload.subject,
       to: payload.to.map(t => t.email),
     };
+
     return res.data;
   } catch (err) {
     lastEmailLog = {
@@ -47,7 +67,7 @@ async function sendBrevoEmail(payload) {
 }
 
 /* ======================
-   STARTUP CHECKS (Important only)
+   STARTUP CHECKS (DO NOT REMOVE)
 ====================== */
 async function startupChecks() {
   console.log("\n=== STARTUP CHECKS ===");
@@ -60,6 +80,57 @@ async function startupChecks() {
 }
 
 /* ======================
+   ORDER VALIDATION (STRICT)
+====================== */
+function validateOrder(body) {
+  if (!Array.isArray(body.items) || !body.items.length) return false;
+  if (!Number.isInteger(body.days) || body.days < 1 || body.days > MAX_DAYS) return false;
+  if (!body.customer?.email?.includes("@")) return false;
+
+  for (const item of body.items) {
+    if (!PRICE_CATALOG[item.id]) return false;
+    if (!Number.isInteger(item.quantity) || item.quantity < 1) return false;
+  }
+
+  return true;
+}
+
+/* ======================
+   PRICING ENGINE (BACKEND ONLY)
+====================== */
+function calculateOrderTotal(order) {
+  let subtotal = 0;
+
+  for (const item of order.items) {
+    const pricePerDay = PRICE_CATALOG[item.id];
+    subtotal += pricePerDay * item.quantity * order.days;
+  }
+
+  let discountTotal = 0;
+  for (const d of order.discounts || []) {
+    const def = DISCOUNTS[d.code];
+    if (!def) continue;
+
+    if (def.type === "percent") {
+      discountTotal += subtotal * (def.value / 100);
+    } else {
+      discountTotal += def.value;
+    }
+  }
+
+  const delivery = order.delivery?.enabled ? DELIVERY_FEE : 0;
+  const total = Math.max(subtotal - discountTotal + delivery, 0);
+
+  return {
+    subtotal,
+    discountTotal,
+    delivery,
+    total,
+    amountCents: Math.round(total * 100),
+  };
+}
+
+/* ======================
    STRIPE WEBHOOK
 ====================== */
 app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, res) => {
@@ -67,7 +138,11 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, r
   let event;
 
   try {
-    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+    event = stripe.webhooks.constructEvent(
+      req.body,
+      sig,
+      process.env.STRIPE_WEBHOOK_SECRET
+    );
     lastWebhook = { time: new Date().toISOString(), type: event.type };
   } catch (err) {
     lastWebhook = { time: new Date().toISOString(), error: err.message };
@@ -75,9 +150,9 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, r
   }
 
   if (event.type === "payment_intent.succeeded") {
-    const paymentIntent = event.data.object;
-    try { await handleSuccessfulPayment(paymentIntent); } 
-    catch { /* silent fail */ }
+    try {
+      await handleSuccessfulPayment(event.data.object);
+    } catch {}
   }
 
   res.json({ received: true });
@@ -91,7 +166,60 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 /* ======================
-   TEST EMAIL ENDPOINT
+   CREATE PAYMENT INTENT (AUTHORITATIVE)
+====================== */
+app.post("/create-payment-intent", async (req, res) => {
+  if (!validateOrder(req.body)) {
+    return res.status(400).json({ error: "Invalid order payload" });
+  }
+
+  const pricing = calculateOrderTotal(req.body);
+
+  try {
+    const intent = await stripe.paymentIntents.create(
+      {
+        amount: pricing.amountCents,
+        currency: "usd",
+        receipt_email: req.body.customer.email,
+        automatic_payment_methods: { enabled: true },
+        metadata: {
+          order: JSON.stringify({
+            ...req.body,
+            pricing,
+          }),
+        },
+      },
+      { idempotencyKey: crypto.randomUUID() }
+    );
+
+    res.json({ clientSecret: intent.client_secret });
+  } catch (err) {
+    console.error("Stripe error:", err.message);
+    res.status(500).json({ error: "Stripe failure" });
+  }
+});
+
+/* ======================
+   HANDLE SUCCESSFUL PAYMENT
+====================== */
+async function handleSuccessfulPayment(paymentIntent) {
+  const order = JSON.parse(paymentIntent.metadata.order || "{}");
+  if (!order.customer?.email) return;
+
+  await sendBrevoEmail({
+    sender: { email: process.env.BREVO_SENDER, name: "Festi Besti" },
+    to: [{ email: order.customer.email, name: order.customer.name }],
+    subject: "Payment Successful – Festi Besti",
+    htmlContent: `
+      <h2>Payment Received</h2>
+      <p>Total Paid: <strong>$${(paymentIntent.amount / 100).toFixed(2)}</strong></p>
+      <p>Thank you for your order.</p>
+    `,
+  });
+}
+
+/* ======================
+   TEST EMAIL
 ====================== */
 app.get("/test-email", async (req, res) => {
   try {
@@ -108,7 +236,7 @@ app.get("/test-email", async (req, res) => {
 });
 
 /* ======================
-   WEBHOOK / EMAIL HEALTH CHECK
+   HEALTH CHECK
 ====================== */
 app.get("/webhook-health", (req, res) => {
   res.json({
@@ -118,95 +246,6 @@ app.get("/webhook-health", (req, res) => {
     timestamp: new Date().toISOString(),
   });
 });
-
-/* ======================
-   CREATE PAYMENT INTENT
-====================== */
-app.post("/create-payment-intent", async (req, res) => {
-  if (!validateOrderPayload(req.body)) return res.status(400).json({ error: "Invalid order data" });
-
-  const { selections, days, customer } = req.body;
-  const amount = calculateTotal(selections, days);
-
-  try {
-    const intent = await stripe.paymentIntents.create(
-      {
-        amount,
-        currency: "usd",
-        receipt_email: customer.email,
-        automatic_payment_methods: { enabled: true },
-        metadata: { order: JSON.stringify(req.body) },
-      },
-      { idempotencyKey: crypto.randomUUID() }
-    );
-
-    res.json({ clientSecret: intent.client_secret });
-  } catch {
-    res.status(500).json({ error: "Payment processing failed" });
-  }
-});
-
-/* ======================
-   HANDLE SUCCESSFUL PAYMENT (Silent)
-====================== */
-async function handleSuccessfulPayment(paymentIntent) {
-  const order = JSON.parse(paymentIntent.metadata.order || "{}");
-  const customer = order.customer || {};
-  if (!customer.email) throw new Error("Customer email missing");
-
-  try {
-    await sendBrevoEmail({
-      sender: { email: process.env.BREVO_SENDER, name: "Festi Besti" },
-      to: [{ email: customer.email, name: customer.name }],
-      subject: "Payment Received – Your Rental Invoice",
-      htmlContent: customerEmailTemplate(paymentIntent, order, customer),
-    });
-  } catch { /* silent */ }
-
-  try {
-    await sendBrevoEmail({
-      sender: { email: process.env.BREVO_SENDER, name: "Festi Besti" },
-      to: [{ email: process.env.ADMIN_EMAIL, name: "Admin" }],
-      subject: "New Paid Order",
-      htmlContent: adminEmailTemplate(paymentIntent, order, customer),
-    });
-  } catch { /* silent */ }
-}
-
-/* ======================
-   ORDER VALIDATION
-====================== */
-function validateOrderPayload(body) {
-  const { selections, days, customer } = body;
-  return Array.isArray(selections) && selections.length &&
-         Number.isInteger(days) && days > 0 && days <= 30 &&
-         customer?.email?.includes("@");
-}
-
-/* ======================
-   PRICING LOGIC
-====================== */
-function calculateTotal(items, days) {
-  return Math.max(
-    items.reduce((sum, item) => sum + calculateItemPrice(item) * getMultiplier(item, days), 0) * 100,
-    0
-  );
-}
-function calculateItemPrice(item) {
-  const pricing = { "Lightning Box": 35, "Winter Box": 25, "Sun Thieves": 30, "Snuggle Seat": 12 };
-  const lower = item.toLowerCase();
-  let price = 0;
-  const key = Object.keys(pricing).find(p => lower.includes(p.toLowerCase()));
-  if (key) price += pricing[key];
-  if (lower.includes("delivery")) price += 6;
-  if (lower.includes("d20")) price += 20;
-  if (lower.includes("inquisitive")) price -= 10;
-  return price;
-}
-function getMultiplier(item, days) {
-  const lower = item.toLowerCase();
-  return (lower.includes("delivery") || lower.includes("d20") || lower.includes("inquisitive")) ? 1 : days;
-}
 
 
 
@@ -382,6 +421,7 @@ app.listen(PORT, async () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
   await startupChecks();
 });
+
 
 
 
