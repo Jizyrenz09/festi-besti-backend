@@ -31,25 +31,23 @@ async function sendBrevoEmail(payload) {
         timeout: 10000,
       }
     );
-    console.log("📨 Brevo email sent:", payload.subject);
     lastEmailLog = {
       time: new Date().toISOString(),
       subject: payload.subject,
-      to: payload.to.map(t => t.email)
+      to: payload.to.map(t => t.email),
     };
     return res.data;
   } catch (err) {
-    console.error("❌ Brevo email failed:", err.response?.data || err.message);
     lastEmailLog = {
       time: new Date().toISOString(),
-      error: err.response?.data || err.message
+      error: err.response?.data || err.message,
     };
     throw err;
   }
 }
 
 /* ======================
-   STARTUP CHECKS
+   STARTUP CHECKS (Important only)
 ====================== */
 async function startupChecks() {
   console.log("\n=== STARTUP CHECKS ===");
@@ -63,45 +61,30 @@ async function startupChecks() {
 
 /* ======================
    STRIPE WEBHOOK
-   (Raw body required for signature verification)
 ====================== */
 app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, res) => {
-  console.log("🔔 Webhook triggered at", new Date().toISOString());
-
   const sig = req.headers["stripe-signature"];
   let event;
 
   try {
     event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
-    console.log("✅ Webhook signature verified:", event.type);
     lastWebhook = { time: new Date().toISOString(), type: event.type };
   } catch (err) {
-    console.error("❌ Webhook signature verification failed:", err.message);
     lastWebhook = { time: new Date().toISOString(), error: err.message };
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
   if (event.type === "payment_intent.succeeded") {
     const paymentIntent = event.data.object;
-    console.log("💰 PaymentIntent succeeded:", paymentIntent.id);
-
-    try {
-      const logs = await handleSuccessfulPayment(paymentIntent);
-      lastWebhook.logs = logs;
-      console.log("📊 Payment success logs:", logs);
-    } catch (err) {
-      console.error("❌ Error handling payment:", err);
-      return res.status(500).send("Internal server error");
-    }
-  } else {
-    console.log("ℹ️ Event ignored (not payment_intent.succeeded):", event.type);
+    try { await handleSuccessfulPayment(paymentIntent); } 
+    catch { /* silent fail */ }
   }
 
   res.json({ received: true });
 });
 
 /* ======================
-   GLOBAL MIDDLEWARE FOR OTHER ROUTES
+   GLOBAL MIDDLEWARE
 ====================== */
 app.use(cors({ origin: "http://yourfestibesti.com" }));
 app.use(express.json());
@@ -112,15 +95,15 @@ app.use(express.urlencoded({ extended: true }));
 ====================== */
 app.get("/test-email", async (req, res) => {
   try {
-    const result = await sendBrevoEmail({
+    await sendBrevoEmail({
       sender: { email: process.env.BREVO_SENDER, name: "Festi Besti" },
       to: [{ email: process.env.ADMIN_EMAIL, name: "Admin" }],
       subject: "Brevo Test Email",
       htmlContent: "<p>If you see this, Brevo is working ✅</p>",
     });
-    res.json({ message: "✅ Test email sent", result });
-  } catch (err) {
-    res.status(500).json({ error: "❌ Test email failed", details: err.response?.data || err.message });
+    res.json({ message: "✅ Test email sent" });
+  } catch {
+    res.status(500).json({ error: "❌ Test email failed" });
   }
 });
 
@@ -140,13 +123,12 @@ app.get("/webhook-health", (req, res) => {
    CREATE PAYMENT INTENT
 ====================== */
 app.post("/create-payment-intent", async (req, res) => {
+  if (!validateOrderPayload(req.body)) return res.status(400).json({ error: "Invalid order data" });
+
+  const { selections, days, customer } = req.body;
+  const amount = calculateTotal(selections, days);
+
   try {
-    if (!validateOrderPayload(req.body))
-      return res.status(400).json({ error: "Invalid order data" });
-
-    const { selections, days, customer } = req.body;
-    const amount = calculateTotal(selections, days);
-
     const intent = await stripe.paymentIntents.create(
       {
         amount,
@@ -158,62 +140,37 @@ app.post("/create-payment-intent", async (req, res) => {
       { idempotencyKey: crypto.randomUUID() }
     );
 
-    console.log(`💳 PaymentIntent created: ${intent.id} for customer ${customer.email}`);
     res.json({ clientSecret: intent.client_secret });
-  } catch (err) {
-    console.error("❌ PaymentIntent error:", err.message);
+  } catch {
     res.status(500).json({ error: "Payment processing failed" });
   }
 });
 
 /* ======================
-   HANDLE SUCCESSFUL PAYMENT
+   HANDLE SUCCESSFUL PAYMENT (Silent)
 ====================== */
 async function handleSuccessfulPayment(paymentIntent) {
-  const logs = { paymentIntentId: paymentIntent.id, emailCustomer: false, emailAdmin: false };
-  console.log(`💰 Handling successful payment: ${paymentIntent.id}`);
-
-  let order;
-  try {
-    order = JSON.parse(paymentIntent.metadata.order || "{}");
-    console.log("📦 Order metadata parsed:", order);
-  } catch (err) {
-    console.error("❌ Failed to parse order metadata:", err.message);
-    throw err;
-  }
-
+  const order = JSON.parse(paymentIntent.metadata.order || "{}");
   const customer = order.customer || {};
-  const sender = { email: process.env.BREVO_SENDER, name: "Festi Besti" };
   if (!customer.email) throw new Error("Customer email missing");
 
   try {
-    console.log("✉️ Sending email to customer:", customer.email);
     await sendBrevoEmail({
-      sender,
+      sender: { email: process.env.BREVO_SENDER, name: "Festi Besti" },
       to: [{ email: customer.email, name: customer.name }],
       subject: "Payment Received – Your Rental Invoice",
       htmlContent: customerEmailTemplate(paymentIntent, order, customer),
     });
-    logs.emailCustomer = true;
-  } catch (err) {
-    console.error("❌ Customer email failed:", err.response?.data || err.message);
-  }
+  } catch { /* silent */ }
 
   try {
-    console.log("✉️ Sending email to admin:", process.env.ADMIN_EMAIL);
     await sendBrevoEmail({
-      sender,
+      sender: { email: process.env.BREVO_SENDER, name: "Festi Besti" },
       to: [{ email: process.env.ADMIN_EMAIL, name: "Admin" }],
       subject: "New Paid Order",
       htmlContent: adminEmailTemplate(paymentIntent, order, customer),
     });
-    logs.emailAdmin = true;
-  } catch (err) {
-    console.error("❌ Admin email failed:", err.response?.data || err.message);
-  }
-
-  console.log(`📌 Payment logs:`, logs);
-  return logs;
+  } catch { /* silent */ }
 }
 
 /* ======================
@@ -221,10 +178,9 @@ async function handleSuccessfulPayment(paymentIntent) {
 ====================== */
 function validateOrderPayload(body) {
   const { selections, days, customer } = body;
-  if (!Array.isArray(selections) || !selections.length) return false;
-  if (!Number.isInteger(days) || days < 1 || days > 30) return false;
-  if (!customer?.email || !customer.email.includes("@")) return false;
-  return true;
+  return Array.isArray(selections) && selections.length &&
+         Number.isInteger(days) && days > 0 && days <= 30 &&
+         customer?.email?.includes("@");
 }
 
 /* ======================
@@ -240,7 +196,7 @@ function calculateItemPrice(item) {
   const pricing = { "Lightning Box": 35, "Winter Box": 25, "Sun Thieves": 30, "Snuggle Seat": 12 };
   const lower = item.toLowerCase();
   let price = 0;
-  const key = Object.keys(pricing).find((p) => lower.includes(p.toLowerCase()));
+  const key = Object.keys(pricing).find(p => lower.includes(p.toLowerCase()));
   if (key) price += pricing[key];
   if (lower.includes("delivery")) price += 6;
   if (lower.includes("d20")) price += 20;
@@ -249,9 +205,14 @@ function calculateItemPrice(item) {
 }
 function getMultiplier(item, days) {
   const lower = item.toLowerCase();
-  if (lower.includes("delivery") || lower.includes("d20") || lower.includes("inquisitive")) return 1;
-  return days;
+  return (lower.includes("delivery") || lower.includes("d20") || lower.includes("inquisitive")) ? 1 : days;
 }
+
+
+
+
+
+
 
 
 
@@ -408,7 +369,6 @@ function adminEmailTemplate(pi, order, customer) {
 
 
 
-
 /* ======================
    HEALTH CHECK
 ====================== */
@@ -422,7 +382,6 @@ app.listen(PORT, async () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
   await startupChecks();
 });
-
 
 
 
