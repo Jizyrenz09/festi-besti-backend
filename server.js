@@ -3,56 +3,9 @@ const crypto = require("crypto");
 const express = require("express");
 const cors = require("cors");
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
-
-
-const app = express();
-
-/* ======================
-   BREVO INIT
-====================== */
 const axios = require("axios");
 
-async function sendBrevoEmail(payload) {
-  try {
-    const res = await axios.post(
-      "https://api.brevo.com/v3/smtp/email",
-      payload,
-      {
-        headers: {
-          "api-key": process.env.BREVO_API_KEY,
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        timeout: 10_000,
-      }
-    );
-
-    console.log("✅ Brevo email sent:", res.data);
-    return res.data;
-  } catch (err) {
-    console.error("\n❌ BREVO AXIOS ERROR");
-    console.error("HTTP Status:", err.response?.status);
-    console.error("Response:", JSON.stringify(err.response?.data, null, 2));
-    console.error("Payload Sent:", JSON.stringify(payload, null, 2));
-    throw err;
-  }
-}
-
-
-
-
-
-
-
-/* ======================
-   SERVICE STATUS
-====================== */
-console.log("\n=== SERVICE STATUS ===");
-console.log("Stripe Key:", process.env.STRIPE_SECRET_KEY ? "Loaded ✅" : "Missing ❌");
-console.log("Brevo API Key:", process.env.BREVO_API_KEY ? "Loaded ✅" : "Missing ❌");
-console.log("Brevo Sender:", process.env.BREVO_SENDER || "❌ Missing");
-console.log("Admin Email:", process.env.ADMIN_EMAIL || "❌ Missing");
-console.log("======================\n");
+const app = express();
 
 /* ======================
    GLOBAL MIDDLEWARE
@@ -60,6 +13,77 @@ console.log("======================\n");
 app.use(cors({ origin: "http://yourfestibesti.com" }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+/* ======================
+   BREVO EMAIL
+====================== */
+async function sendBrevoEmail(payload) {
+  return axios.post(
+    "https://api.brevo.com/v3/smtp/email",
+    payload,
+    {
+      headers: {
+        "api-key": process.env.BREVO_API_KEY,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      timeout: 10_000,
+    }
+  );
+}
+
+/* ======================
+   STARTUP CHECKS
+====================== */
+async function runStartupChecks() {
+  console.log("\n=== STARTUP CHECKS ===");
+
+  // Env keys
+  const keys = {
+    STRIPE: process.env.STRIPE_SECRET_KEY,
+    BREVO_KEY: process.env.BREVO_API_KEY,
+    BREVO_SENDER: process.env.BREVO_SENDER,
+    ADMIN_EMAIL: process.env.ADMIN_EMAIL,
+  };
+  for (const [name, value] of Object.entries(keys)) {
+    console.log(`${name}:`, value ? "Loaded ✅" : "Missing ❌");
+  }
+
+  // Brevo test email
+  try {
+    if (keys.BREVO_KEY && keys.BREVO_SENDER && keys.ADMIN_EMAIL) {
+      await sendBrevoEmail({
+        sender: { email: keys.BREVO_SENDER, name: "Festi Besti" },
+        to: [{ email: keys.ADMIN_EMAIL, name: "Admin" }],
+        subject: "Startup Test Email",
+        htmlContent: "<p>Brevo check successful ✅</p>",
+      });
+      console.log("Brevo email test: ✅ Passed");
+    } else {
+      console.log("Brevo email test: ⚠️ Skipped (missing keys)");
+    }
+  } catch {
+    console.log("Brevo email test: ❌ Failed (check API key & sender)");
+  }
+
+  // Stripe test
+  try {
+    if (keys.STRIPE) {
+      await stripe.paymentIntents.create({
+        amount: 1,
+        currency: "usd",
+        payment_method_types: ["card"],
+      });
+      console.log("Stripe API test: ✅ Passed");
+    } else {
+      console.log("Stripe API test: ⚠️ Skipped (missing key)");
+    }
+  } catch {
+    console.log("Stripe API test: ❌ Failed");
+  }
+
+  console.log("======================\n");
+}
 
 /* ======================
    STRIPE WEBHOOK
@@ -79,71 +103,13 @@ app.post("/webhook", express.raw({ type: "application/json" }), async (req, res)
 
     res.json({ received: true });
   } catch (err) {
-    console.error("❌ Stripe Webhook Error:", err.message);
+    // Minimal logging
     res.status(400).send("Webhook Error");
   }
 });
 
 /* ======================
-   BREVO ERROR INSPECTOR
-====================== */
-function logBrevoError(err, context = "Brevo") {
-  console.error(`\n❌ ${context} ERROR`);
-
-  const status = err?.response?.status;
-  const body = err?.response?.body;
-
-  console.error("HTTP Status:", status || "N/A");
-
-  if (body) {
-    console.error("Brevo Response Body:", JSON.stringify(body, null, 2));
-
-    const message = body.message || body.error || "";
-
-    if (status === 401) console.error("➡️ INVALID API KEY");
-    if (status === 403) console.error("➡️ FORBIDDEN / PROJECT RESTRICTED");
-    if (message.includes("sender")) console.error("➡️ SENDER NOT VERIFIED");
-    if (message.includes("not allowed")) console.error("➡️ RECIPIENT NOT ALLOWED (SANDBOX)");
-  } else {
-    console.error("Error Message:", err.message);
-  }
-
-  console.error("FULL ERROR OBJECT:");
-  console.error(JSON.stringify(err, null, 2));
-  console.error("================================\n");
-}
-
-/* ======================
-   TEST EMAIL ENDPOINT (FIXED)
-====================== */
-app.get("/test-email", async (req, res) => {
-  try {
-    await sendBrevoEmail({
-      sender: {
-        email: process.env.BREVO_SENDER,
-        name: "Festi Besti",
-      },
-      to: [
-        {
-          email: process.env.ADMIN_EMAIL,
-          name: "Admin",
-        },
-      ],
-      subject: "Brevo Test Email",
-      htmlContent: "<p>If you see this, Brevo is working ✅</p>",
-    });
-
-    res.send("✅ Test email sent");
-  } catch {
-    res.status(500).send("❌ Test email failed");
-  }
-});
-
-
-
-
-/* ======================
-   PAYMENT INTENT
+   PAYMENT LOGIC
 ====================== */
 function validateOrderPayload(body) {
   const { selections, days, customer } = body;
@@ -155,7 +121,6 @@ function validateOrderPayload(body) {
 app.post("/create-payment-intent", async (req, res) => {
   try {
     validateOrderPayload(req.body);
-
     const { selections, days, customer } = req.body;
     const amount = calculateTotal(selections, days);
 
@@ -174,14 +139,10 @@ app.post("/create-payment-intent", async (req, res) => {
 
     res.json({ clientSecret: intent.client_secret });
   } catch (err) {
-    console.error("❌ PaymentIntent Error:", err.message);
     res.status(400).json({ error: err.message });
   }
 });
 
-/* ======================
-   SUCCESSFUL PAYMENT (FIXED)
-====================== */
 async function handleSuccessfulPayment(paymentIntent) {
   try {
     const data = JSON.parse(paymentIntent.metadata.order || "{}");
@@ -190,32 +151,32 @@ async function handleSuccessfulPayment(paymentIntent) {
 
     const sender = { email: process.env.BREVO_SENDER, name: "Festi Besti" };
 
-    await brevoClient.sendTransacEmail({
+    // Send emails silently
+    await sendBrevoEmail({
       sender,
       to: [{ email: customer.email, name: customer.name }],
       subject: "Payment Received – Your Rental Invoice",
       htmlContent: customerEmailTemplate(paymentIntent, order, customer),
     });
 
-    await brevoClient.sendTransacEmail({
+    await sendBrevoEmail({
       sender,
       to: [{ email: process.env.ADMIN_EMAIL, name: "Admin" }],
       subject: "New Paid Order",
       htmlContent: adminEmailTemplate(paymentIntent, order, customer),
     });
 
-    console.log(`✅ Emails sent for payment ${paymentIntent.id}`);
-  } catch (err) {
-    logBrevoError(err, "PAYMENT EMAIL");
+  } catch {
+    // Suppress errors in production
   }
 }
 
-/* ====================== PRICING LOGIC ====================== */
+/* ======================
+   PRICING LOGIC
+====================== */
 function calculateTotal(items, days) {
   let total = 0;
-  items.forEach((item) => {
-    total += calculateItemPrice(item) * getMultiplier(item, days);
-  });
+  items.forEach(item => total += calculateItemPrice(item) * getMultiplier(item, days));
   return Math.max(total * 100, 0);
 }
 
@@ -226,13 +187,11 @@ function calculateItemPrice(item) {
     "Sun Thieves": 30,
     "Snuggle Seat": 12,
   };
-
   const lower = item.toLowerCase();
   let price = 0;
 
-  const key = Object.keys(pricing).find((p) => lower.includes(p.toLowerCase()));
+  const key = Object.keys(pricing).find(p => lower.includes(p.toLowerCase()));
   if (key) price += pricing[key];
-
   if (lower.includes("delivery")) price += 6;
   if (lower.includes("d20")) price += 20;
   if (lower.includes("inquisitive")) price -= 10;
@@ -242,15 +201,9 @@ function calculateItemPrice(item) {
 
 function getMultiplier(item, days) {
   const lower = item.toLowerCase();
-  if (lower.includes("delivery") || lower.includes("d20") || lower.includes("inquisitive")) {
-    return 1;
-  }
+  if (lower.includes("delivery") || lower.includes("d20") || lower.includes("inquisitive")) return 1;
   return days;
 }
-
-
-
-
 
 
 
@@ -390,23 +343,18 @@ function adminEmailTemplate(pi, order, customer) {
 
 
 
-
 /* ======================
    HEALTH CHECK
 ====================== */
-app.get("/", (req, res) => {
-  res.send("Server running (Stripe + Brevo TEST MODE)");
-});
+app.get("/", (req, res) => res.send("Server running (Stripe + Brevo TEST MODE)"));
 
 /* ======================
    START SERVER
 ====================== */
 const PORT = process.env.PORT || 4242;
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
+  await runStartupChecks();
 });
-
-
-
 
 
