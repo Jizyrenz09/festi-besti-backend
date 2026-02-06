@@ -3,32 +3,32 @@ const crypto = require("crypto");
 const express = require("express");
 const cors = require("cors");
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
-  
-const { TransactionalEmailsApi, Configuration, SendSmtpEmail } = require("@getbrevo/brevo");
 
-// Initialize Brevo client
-const brevoClient = new TransactionalEmailsApi(
-  new Configuration({ apiKey: process.env.BREVO_API_KEY })
+// ✅ CORRECT BREVO IMPORT
+const Brevo = require("@getbrevo/brevo");
+
+// ======================
+// INIT BREVO (CORRECT)
+// ======================
+const brevoClient = new Brevo.TransactionalEmailsApi();
+brevoClient.setApiKey(
+  Brevo.TransactionalEmailsApiApiKeys.apiKey,
+  process.env.BREVO_API_KEY
 );
-
 
 const app = express();
 
-
 /* ======================
-   SERVICE STATUS + TEST EMAIL
+   SERVICE STATUS
 ====================== */
 console.log("=== SERVICE STATUS ===");
 console.log("Stripe Key:", process.env.STRIPE_SECRET_KEY ? "Loaded ✅" : "Missing ❌");
 console.log("Brevo API Key:", process.env.BREVO_API_KEY ? "Loaded ✅" : "Missing ❌");
 
-
-
 /* ====================== GLOBAL MIDDLEWARE ====================== */
 app.use(cors({ origin: "http://yourfestibesti.com" }));
-// NOTE: We do NOT use express.json() globally because Stripe webhooks need RAW body
 
-/* ====================== STRIPE WEBHOOK (RAW BODY ONLY) ====================== */
+/* ====================== STRIPE WEBHOOK (RAW BODY) ====================== */
 app.post(
   "/webhook",
   express.raw({ type: "application/json" }),
@@ -42,85 +42,67 @@ app.post(
         process.env.STRIPE_WEBHOOK_SECRET
       );
     } catch (err) {
-      console.error("❌ Webhook signature verification failed:", err.message);
+      console.error("❌ Webhook signature failed:", err.message);
       return res.status(400).send("Webhook Error");
     }
 
     if (event.type === "payment_intent.succeeded") {
       await handleSuccessfulPayment(event.data.object);
     }
+
     res.json({ received: true });
   }
 );
 
-/* ====================== JSON MIDDLEWARE (NON-WEBHOOK ROUTES ONLY) ====================== */
+/* ====================== JSON (NON-WEBHOOK ROUTES) ====================== */
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-
-
-
-
-
-
-
-
-
-
-
 /* ======================
-   TEST EMAIL ENDPOINT (FIXED)
+   TEST EMAIL ENDPOINT (WORKING)
 ====================== */
 app.get("/test-email", async (req, res) => {
   try {
-    const email = new SendSmtpEmail({
-      sender: { email: process.env.BREVO_SENDER, name: "Festi Besti" },
+    const email = new Brevo.SendSmtpEmail({
+      sender: {
+        email: process.env.BREVO_SENDER,
+        name: "Festi Besti",
+      },
       to: [{ email: process.env.ADMIN_EMAIL, name: "Admin" }],
-      subject: "Test Email from Render",
-      htmlContent: "<p>If you see this, emails are working ✅</p>",
+      subject: "Brevo Test Email",
+      htmlContent: "<p>If you see this, Brevo is working ✅</p>",
     });
 
     const response = await brevoClient.sendTransacEmail(email);
-    console.log("✅ Test email response:", response);
-    res.send("✅ Test email sent. Check your inbox.");
+    console.log("✅ Test email sent:", response);
+
+    res.send("✅ Test email sent");
   } catch (err) {
-    console.error("❌ Test email failed:", err.response ? err.response.body : err.message);
-    res.status(500).send("❌ Test email failed: " + err.message);
+    console.error("❌ Test email failed:", err?.response?.body || err.message);
+    res.status(500).send("❌ Test email failed");
   }
 });
 
-
-
-
-
-
-
-
-
-
-
-
-
-/* ====================== CREATE PAYMENT INTENT ====================== */
+/* ======================
+   CREATE PAYMENT INTENT
+====================== */
 function validateOrderPayload(body) {
   const { selections, days, customer } = body;
-  if (!Array.isArray(selections) || selections.length === 0) {
+  if (!Array.isArray(selections) || selections.length === 0)
     throw new Error("Invalid selections");
-  }
-  if (!Number.isInteger(days) || days < 1 || days > 30) {
+  if (!Number.isInteger(days) || days < 1 || days > 30)
     throw new Error("Invalid rental duration");
-  }
-  if (!customer || typeof customer.email !== "string" || !customer.email.includes("@")) {
+  if (!customer?.email || !customer.email.includes("@"))
     throw new Error("Valid customer email required");
-  }
 }
 
 app.post("/create-payment-intent", async (req, res) => {
   try {
     validateOrderPayload(req.body);
     const { selections, startDate, endDate, days, customer } = req.body;
+
     const amount = calculateTotal(selections, days);
-    if (amount <= 0) return res.status(400).json({ error: "Invalid payment amount" });
+    if (amount <= 0) throw new Error("Invalid payment amount");
 
     const intent = await stripe.paymentIntents.create(
       {
@@ -130,11 +112,7 @@ app.post("/create-payment-intent", async (req, res) => {
         automatic_payment_methods: { enabled: true },
         metadata: {
           order: JSON.stringify({ selections, startDate, endDate, days }),
-          customer: JSON.stringify({
-            name: customer.name,
-            email: customer.email,
-            phone: customer.phone || "",
-          }),
+          customer: JSON.stringify(customer),
         },
       },
       { idempotencyKey: crypto.randomUUID() }
@@ -147,60 +125,41 @@ app.post("/create-payment-intent", async (req, res) => {
   }
 });
 
-
-
-
-
-
-
-
-
-
-
-
-
 /* ======================
-   HANDLE SUCCESSFUL PAYMENT (FIXED)
+   HANDLE SUCCESSFUL PAYMENT
 ====================== */
 async function handleSuccessfulPayment(paymentIntent) {
   try {
     const order = JSON.parse(paymentIntent.metadata.order || "{}");
     const customer = JSON.parse(paymentIntent.metadata.customer || "{}");
-    const customerEmail = customer.email;
 
-    // === Send to customer ===
-    try {
-      const emailCustomer = new SendSmtpEmail({
-        sender: { email: process.env.BREVO_SENDER, name: "Festi Besti" },
-        to: [{ email: customerEmail, name: customer.name }],
+    const baseEmail = {
+      sender: { email: process.env.BREVO_SENDER, name: "Festi Besti" },
+    };
+
+    // === CUSTOMER EMAIL ===
+    await brevoClient.sendTransacEmail(
+      new Brevo.SendSmtpEmail({
+        ...baseEmail,
+        to: [{ email: customer.email, name: customer.name }],
         subject: "Payment Received – Your Rental Invoice",
         htmlContent: customerEmailTemplate(paymentIntent, order, customer),
-      });
+      })
+    );
 
-      const customerResponse = await brevoClient.sendTransacEmail(emailCustomer);
-      console.log("✅ Customer email sent successfully:", customerResponse);
-    } catch (err) {
-      console.error("❌ Customer email failed:", err.response ? err.response.body : err.message);
-    }
-
-    // === Send to admin ===
-    try {
-      const emailAdmin = new SendSmtpEmail({
-        sender: { email: process.env.BREVO_SENDER, name: "Festi Besti" },
+    // === ADMIN EMAIL ===
+    await brevoClient.sendTransacEmail(
+      new Brevo.SendSmtpEmail({
+        ...baseEmail,
         to: [{ email: process.env.ADMIN_EMAIL, name: "Admin" }],
-        subject: "New Paid Order Received",
+        subject: "New Paid Order",
         htmlContent: adminEmailTemplate(paymentIntent, order, customer),
-      });
+      })
+    );
 
-      const adminResponse = await brevoClient.sendTransacEmail(emailAdmin);
-      console.log("✅ Admin email sent successfully:", adminResponse);
-    } catch (err) {
-      console.error("❌ Admin email failed:", err.response ? err.response.body : err.message);
-    }
-
-    console.log(`🚀 Payment processed: ${paymentIntent.id}`);
+    console.log(`✅ Emails sent for payment ${paymentIntent.id}`);
   } catch (err) {
-    console.error("❌ Unexpected error in handleSuccessfulPayment:", err.message);
+    console.error("❌ Email send error:", err?.response?.body || err.message);
   }
 }
 
@@ -260,6 +219,19 @@ function getMultiplier(item, days) {
 
   return days; // per-day rental
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 /* ======================
@@ -382,6 +354,15 @@ function adminEmailTemplate(pi, order, customer) {
 }
 
 
+
+
+
+
+
+
+
+
+
 /* ======================
    HEALTH CHECK
 ====================== */
@@ -396,4 +377,5 @@ const PORT = process.env.PORT || 4242;
 app.listen(PORT, () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
 });
+
 
