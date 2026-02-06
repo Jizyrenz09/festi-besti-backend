@@ -114,55 +114,96 @@ app.post("/create-payment-intent", async (req, res) => {
 });
 
 /* ======================
-   HANDLE PAYMENT SUCCESS
+   HANDLE PAYMENT SUCCESS (DEBUG VERSION)
 ====================== */
 async function handleSuccessfulPayment(paymentIntent) {
-  try {
-    const data = JSON.parse(paymentIntent.metadata.order || "{}");
-    const customer = data.customer || {};
-    const order = data;
-    const sender = { email: process.env.BREVO_SENDER, name: "Festi Besti" };
+  const order = JSON.parse(paymentIntent.metadata.order || "{}");
+  const customer = order.customer || {};
+  const sender = { email: process.env.BREVO_SENDER, name: "Festi Besti" };
 
-    // Email customer
-    await sendBrevoEmail({
+  console.log("📧 Sending emails for paymentIntent:", paymentIntent.id);
+  console.log("👤 Customer info:", customer);
+
+  if (!customer.email) {
+    throw new Error("Customer email missing");
+  }
+
+  try {
+    console.log("✉️ Sending email to customer:", customer.email);
+    const customerRes = await sendBrevoEmail({
       sender,
       to: [{ email: customer.email, name: customer.name }],
       subject: "Payment Received – Your Rental Invoice",
       htmlContent: customerEmailTemplate(paymentIntent, order, customer),
     });
+    console.log("✅ Customer email response:", customerRes);
+  } catch (err) {
+    console.error("❌ Customer email failed:", err.response?.data || err.message);
+  }
 
-    // Email admin
-    await sendBrevoEmail({
+  try {
+    console.log("✉️ Sending email to admin:", process.env.ADMIN_EMAIL);
+    const adminRes = await sendBrevoEmail({
       sender,
       to: [{ email: process.env.ADMIN_EMAIL, name: "Admin" }],
       subject: "New Paid Order",
       htmlContent: adminEmailTemplate(paymentIntent, order, customer),
     });
-
-    console.log(`✅ Emails sent for payment ${paymentIntent.id}`);
+    console.log("✅ Admin email response:", adminRes);
   } catch (err) {
-    console.error("⚠️ Payment email error:", err.response?.data || err.message);
+    console.error("❌ Admin email failed:", err.response?.data || err.message);
   }
+
+  console.log(`📌 Emails finished for payment ${paymentIntent.id}`);
 }
 
 /* ======================
-   STRIPE WEBHOOK
+   STRIPE WEBHOOK (DEBUG VERSION)
 ====================== */
 app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, res) => {
   const sig = req.headers["stripe-signature"];
   let event;
 
+  console.log("🔔 Webhook received:", req.headers);
+
   try {
     event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+    console.log("✅ Webhook signature verified:", event.type);
   } catch (err) {
-    console.log("❌ Webhook signature verification failed:", err.message);
+    console.error("❌ Webhook signature verification failed:", err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
   if (event.type === "payment_intent.succeeded") {
     const paymentIntent = event.data.object;
-    console.log(`💰 PaymentIntent succeeded: ${paymentIntent.id}`);
-    await handleSuccessfulPayment(paymentIntent);
+    console.log("💰 PaymentIntent succeeded:", paymentIntent.id);
+    console.log("📄 Metadata:", paymentIntent.metadata);
+
+    // Check that metadata exists and is parsable
+    let orderData;
+    try {
+      orderData = JSON.parse(paymentIntent.metadata.order || "{}");
+      console.log("📦 Order data parsed:", orderData);
+    } catch (err) {
+      console.error("❌ Failed to parse order metadata:", err.message);
+      return res.status(400).send("Invalid metadata JSON");
+    }
+
+    // Check customer email
+    if (!orderData.customer?.email) {
+      console.error("❌ Customer email missing in metadata:", orderData.customer);
+      return res.status(400).send("Customer email missing");
+    }
+
+    try {
+      await handleSuccessfulPayment(paymentIntent);
+      console.log("✅ handleSuccessfulPayment completed");
+    } catch (err) {
+      console.error("❌ Error in handleSuccessfulPayment:", err.response?.data || err.message);
+      return res.status(500).send("Internal server error");
+    }
+  } else {
+    console.log("ℹ️ Event ignored (not payment_intent.succeeded):", event.type);
   }
 
   res.json({ received: true });
@@ -345,6 +386,7 @@ app.listen(PORT, async () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
   await startupChecks();
 });
+
 
 
 
