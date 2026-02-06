@@ -4,6 +4,7 @@ const express = require("express");
 const cors = require("cors");
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const axios = require("axios");
+const bodyParser = require("body-parser");
 
 const app = express();
 
@@ -28,14 +29,17 @@ async function sendBrevoEmail(payload) {
           "Content-Type": "application/json",
           Accept: "application/json",
         },
-        timeout: 10_000,
+        timeout: 10000,
       }
     );
+    console.log("📨 Brevo email sent:", payload.subject);
     return res.data;
   } catch (err) {
-    throw new Error(
-      `Brevo email failed: ${err.response?.status || ""} ${JSON.stringify(err.response?.data || err.message)}`
+    console.error(
+      `❌ Brevo email failed:`,
+      err.response?.data || err.message
     );
+    throw err;
   }
 }
 
@@ -44,16 +48,11 @@ async function sendBrevoEmail(payload) {
 ====================== */
 async function startupChecks() {
   console.log("\n=== STARTUP CHECKS ===");
-  if (!process.env.STRIPE_SECRET_KEY) console.warn("❌ Stripe key missing!");
-  else console.log("✅ Stripe key loaded");
-  if (!process.env.BREVO_API_KEY) console.warn("❌ Brevo API key missing!");
-  else console.log("✅ Brevo key loaded");
-  if (!process.env.BREVO_SENDER) console.warn("❌ Brevo sender missing!");
-  else console.log("✅ Brevo sender loaded");
-  if (!process.env.ADMIN_EMAIL) console.warn("❌ Admin email missing!");
-  else console.log("✅ Admin email loaded");
-  if (!process.env.STRIPE_WEBHOOK_SECRET) console.warn("❌ Stripe webhook secret missing!");
-  else console.log("✅ Stripe webhook secret loaded");
+  console.log(process.env.STRIPE_SECRET_KEY ? "✅ Stripe key loaded" : "❌ Stripe key missing!");
+  console.log(process.env.BREVO_API_KEY ? "✅ Brevo key loaded" : "❌ Brevo API key missing!");
+  console.log(process.env.BREVO_SENDER ? "✅ Brevo sender loaded" : "❌ Brevo sender missing!");
+  console.log(process.env.ADMIN_EMAIL ? "✅ Admin email loaded" : "❌ Admin email missing!");
+  console.log(process.env.STRIPE_WEBHOOK_SECRET ? "✅ Stripe webhook secret loaded" : "❌ Stripe webhook secret missing!");
   console.log("======================\n");
 }
 
@@ -90,22 +89,26 @@ function validateOrderPayload(body) {
 ====================== */
 app.post("/create-payment-intent", async (req, res) => {
   try {
-    if (!validateOrderPayload(req.body)) return res.status(400).json({ error: "Invalid order data" });
+    if (!validateOrderPayload(req.body))
+      return res.status(400).json({ error: "Invalid order data" });
 
     const { selections, days, customer } = req.body;
     const amount = calculateTotal(selections, days);
 
-    const intent = await stripe.paymentIntents.create({
-      amount,
-      currency: "usd",
-      receipt_email: customer.email,
-      automatic_payment_methods: { enabled: true },
-      metadata: { order: JSON.stringify(req.body) },
-    }, { idempotencyKey: crypto.randomUUID() });
+    const intent = await stripe.paymentIntents.create(
+      {
+        amount,
+        currency: "usd",
+        receipt_email: customer.email,
+        automatic_payment_methods: { enabled: true },
+        metadata: { order: JSON.stringify(req.body) },
+      },
+      { idempotencyKey: crypto.randomUUID() }
+    );
 
     res.json({ clientSecret: intent.client_secret });
   } catch (err) {
-    console.warn("PaymentIntent error:", err.message);
+    console.error("PaymentIntent error:", err.message);
     res.status(500).json({ error: "Payment processing failed" });
   }
 });
@@ -138,14 +141,14 @@ async function handleSuccessfulPayment(paymentIntent) {
 
     console.log(`✅ Emails sent for payment ${paymentIntent.id}`);
   } catch (err) {
-    console.warn("⚠️ Payment email error:", err.message);
+    console.error("⚠️ Payment email error:", err.response?.data || err.message);
   }
 }
 
 /* ======================
-   STRIPE WEBHOOK (LIVE/TEST)
+   STRIPE WEBHOOK
 ====================== */
-app.post("/webhook", express.raw({ type: "application/json" }), async (req, res) => {
+app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, res) => {
   const sig = req.headers["stripe-signature"];
   let event;
 
@@ -156,7 +159,6 @@ app.post("/webhook", express.raw({ type: "application/json" }), async (req, res)
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
-  // Handle only the successful payment_intent
   if (event.type === "payment_intent.succeeded") {
     const paymentIntent = event.data.object;
     console.log(`💰 PaymentIntent succeeded: ${paymentIntent.id}`);
@@ -343,6 +345,7 @@ app.listen(PORT, async () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
   await startupChecks();
 });
+
 
 
 
