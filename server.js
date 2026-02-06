@@ -85,6 +85,37 @@ async function runStartupChecks() {
   console.log("======================\n");
 }
 
+
+
+
+
+
+/* ======================
+   TEST EMAIL ENDPOINT
+====================== */
+app.get("/test-email", async (req, res) => {
+  try {
+    await sendBrevoEmail({
+      sender: { email: process.env.BREVO_SENDER, name: "Festi Besti" },
+      to: [{ email: process.env.ADMIN_EMAIL, name: "Admin" }],
+      subject: "Brevo Test Email",
+      htmlContent: "<p>If you see this, Brevo is working ✅</p>",
+    });
+    res.send("✅ Test email sent");
+  } catch {
+    res.status(500).send("❌ Test email failed (check API key or sender)");
+  }
+});
+
+
+
+
+
+
+
+
+
+
 /* ======================
    STRIPE WEBHOOK
 ====================== */
@@ -356,5 +387,6 @@ app.listen(PORT, async () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
   await runStartupChecks();
 });
+
 
 
