@@ -35,10 +35,7 @@ async function sendBrevoEmail(payload) {
     console.log("📨 Brevo email sent:", payload.subject);
     return res.data;
   } catch (err) {
-    console.error(
-      `❌ Brevo email failed:`,
-      err.response?.data || err.message
-    );
+    console.error("❌ Brevo email failed:", err.response?.data || err.message);
     throw err;
   }
 }
@@ -61,28 +58,17 @@ async function startupChecks() {
 ====================== */
 app.get("/test-email", async (req, res) => {
   try {
-    await sendBrevoEmail({
+    const result = await sendBrevoEmail({
       sender: { email: process.env.BREVO_SENDER, name: "Festi Besti" },
       to: [{ email: process.env.ADMIN_EMAIL, name: "Admin" }],
       subject: "Brevo Test Email",
       htmlContent: "<p>If you see this, Brevo is working ✅</p>",
     });
-    res.send("✅ Test email sent");
-  } catch {
-    res.status(500).send("❌ Test email failed (check API key or sender)");
+    res.json({ message: "✅ Test email sent", result });
+  } catch (err) {
+    res.status(500).json({ error: "❌ Test email failed", details: err.response?.data || err.message });
   }
 });
-
-/* ======================
-   ORDER VALIDATION
-====================== */
-function validateOrderPayload(body) {
-  const { selections, days, customer } = body;
-  if (!Array.isArray(selections) || !selections.length) return false;
-  if (!Number.isInteger(days) || days < 1 || days > 30) return false;
-  if (!customer?.email || !customer.email.includes("@")) return false;
-  return true;
-}
 
 /* ======================
    PAYMENT INTENT
@@ -106,65 +92,80 @@ app.post("/create-payment-intent", async (req, res) => {
       { idempotencyKey: crypto.randomUUID() }
     );
 
+    console.log(`💳 PaymentIntent created: ${intent.id} for customer ${customer.email}`);
     res.json({ clientSecret: intent.client_secret });
   } catch (err) {
-    console.error("PaymentIntent error:", err.message);
+    console.error("❌ PaymentIntent error:", err.message);
     res.status(500).json({ error: "Payment processing failed" });
   }
 });
 
 /* ======================
-   HANDLE PAYMENT SUCCESS (DEBUG VERSION)
+   HANDLE PAYMENT SUCCESS WITH LOGS
 ====================== */
 async function handleSuccessfulPayment(paymentIntent) {
-  const order = JSON.parse(paymentIntent.metadata.order || "{}");
+  const logs = { paymentIntentId: paymentIntent.id, emailCustomer: false, emailAdmin: false };
+  console.log(`💰 Handling successful payment: ${paymentIntent.id}`);
+
+  let order;
+  try {
+    order = JSON.parse(paymentIntent.metadata.order || "{}");
+    console.log("📦 Order metadata parsed:", order);
+  } catch (err) {
+    console.error("❌ Failed to parse order metadata:", err.message);
+    throw err;
+  }
+
   const customer = order.customer || {};
   const sender = { email: process.env.BREVO_SENDER, name: "Festi Besti" };
 
-  console.log("📧 Sending emails for paymentIntent:", paymentIntent.id);
-  console.log("👤 Customer info:", customer);
-
   if (!customer.email) {
+    console.error("❌ Customer email missing!");
     throw new Error("Customer email missing");
   }
 
+  // Send email to customer
   try {
     console.log("✉️ Sending email to customer:", customer.email);
-    const customerRes = await sendBrevoEmail({
+    await sendBrevoEmail({
       sender,
       to: [{ email: customer.email, name: customer.name }],
       subject: "Payment Received – Your Rental Invoice",
       htmlContent: customerEmailTemplate(paymentIntent, order, customer),
     });
-    console.log("✅ Customer email response:", customerRes);
+    logs.emailCustomer = true;
+    console.log("✅ Customer email sent successfully");
   } catch (err) {
     console.error("❌ Customer email failed:", err.response?.data || err.message);
   }
 
+  // Send email to admin
   try {
     console.log("✉️ Sending email to admin:", process.env.ADMIN_EMAIL);
-    const adminRes = await sendBrevoEmail({
+    await sendBrevoEmail({
       sender,
       to: [{ email: process.env.ADMIN_EMAIL, name: "Admin" }],
       subject: "New Paid Order",
       htmlContent: adminEmailTemplate(paymentIntent, order, customer),
     });
-    console.log("✅ Admin email response:", adminRes);
+    logs.emailAdmin = true;
+    console.log("✅ Admin email sent successfully");
   } catch (err) {
     console.error("❌ Admin email failed:", err.response?.data || err.message);
   }
 
-  console.log(`📌 Emails finished for payment ${paymentIntent.id}`);
+  console.log(`📌 Payment logs:`, logs);
+  return logs;
 }
 
 /* ======================
-   STRIPE WEBHOOK (DEBUG VERSION)
+   STRIPE WEBHOOK
 ====================== */
 app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, res) => {
+  console.log("🔔 Webhook triggered");
+
   const sig = req.headers["stripe-signature"];
   let event;
-
-  console.log("🔔 Webhook received:", req.headers);
 
   try {
     event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
@@ -177,29 +178,12 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, r
   if (event.type === "payment_intent.succeeded") {
     const paymentIntent = event.data.object;
     console.log("💰 PaymentIntent succeeded:", paymentIntent.id);
-    console.log("📄 Metadata:", paymentIntent.metadata);
-
-    // Check that metadata exists and is parsable
-    let orderData;
-    try {
-      orderData = JSON.parse(paymentIntent.metadata.order || "{}");
-      console.log("📦 Order data parsed:", orderData);
-    } catch (err) {
-      console.error("❌ Failed to parse order metadata:", err.message);
-      return res.status(400).send("Invalid metadata JSON");
-    }
-
-    // Check customer email
-    if (!orderData.customer?.email) {
-      console.error("❌ Customer email missing in metadata:", orderData.customer);
-      return res.status(400).send("Customer email missing");
-    }
 
     try {
-      await handleSuccessfulPayment(paymentIntent);
-      console.log("✅ handleSuccessfulPayment completed");
+      const logs = await handleSuccessfulPayment(paymentIntent);
+      console.log("📊 Payment success logs:", logs);
     } catch (err) {
-      console.error("❌ Error in handleSuccessfulPayment:", err.response?.data || err.message);
+      console.error("❌ Error in handling successful payment:", err);
       return res.status(500).send("Internal server error");
     }
   } else {
@@ -208,6 +192,17 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, r
 
   res.json({ received: true });
 });
+
+/* ======================
+   ORDER VALIDATION
+====================== */
+function validateOrderPayload(body) {
+  const { selections, days, customer } = body;
+  if (!Array.isArray(selections) || !selections.length) return false;
+  if (!Number.isInteger(days) || days < 1 || days > 30) return false;
+  if (!customer?.email || !customer.email.includes("@")) return false;
+  return true;
+}
 
 /* ======================
    PRICING LOGIC
@@ -234,6 +229,27 @@ function getMultiplier(item, days) {
   if (lower.includes("delivery") || lower.includes("d20") || lower.includes("inquisitive")) return 1;
   return days;
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -386,6 +402,7 @@ app.listen(PORT, async () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
   await startupChecks();
 });
+
 
 
 
