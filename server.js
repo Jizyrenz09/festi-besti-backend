@@ -44,20 +44,16 @@ async function sendBrevoEmail(payload) {
 ====================== */
 async function startupChecks() {
   console.log("\n=== STARTUP CHECKS ===");
-
   if (!process.env.STRIPE_SECRET_KEY) console.warn("❌ Stripe key missing!");
   else console.log("✅ Stripe key loaded");
-
   if (!process.env.BREVO_API_KEY) console.warn("❌ Brevo API key missing!");
-  else console.log("✅ Brevo API key loaded");
-
+  else console.log("✅ Brevo key loaded");
   if (!process.env.BREVO_SENDER) console.warn("❌ Brevo sender missing!");
   else console.log("✅ Brevo sender loaded");
-
   if (!process.env.ADMIN_EMAIL) console.warn("❌ Admin email missing!");
   else console.log("✅ Admin email loaded");
-
-
+  if (!process.env.STRIPE_WEBHOOK_SECRET) console.warn("❌ Stripe webhook secret missing!");
+  else console.log("✅ Stripe webhook secret loaded");
   console.log("======================\n");
 }
 
@@ -89,7 +85,6 @@ function validateOrderPayload(body) {
   return true;
 }
 
-
 /* ======================
    PAYMENT INTENT
 ====================== */
@@ -110,7 +105,7 @@ app.post("/create-payment-intent", async (req, res) => {
 
     res.json({ clientSecret: intent.client_secret });
   } catch (err) {
-    console.warn("PaymentIntent error:", err.message); // minimal logs
+    console.warn("PaymentIntent error:", err.message);
     res.status(500).json({ error: "Payment processing failed" });
   }
 });
@@ -125,6 +120,7 @@ async function handleSuccessfulPayment(paymentIntent) {
     const order = data;
     const sender = { email: process.env.BREVO_SENDER, name: "Festi Besti" };
 
+    // Email customer
     await sendBrevoEmail({
       sender,
       to: [{ email: customer.email, name: customer.name }],
@@ -132,6 +128,7 @@ async function handleSuccessfulPayment(paymentIntent) {
       htmlContent: customerEmailTemplate(paymentIntent, order, customer),
     });
 
+    // Email admin
     await sendBrevoEmail({
       sender,
       to: [{ email: process.env.ADMIN_EMAIL, name: "Admin" }],
@@ -146,25 +143,27 @@ async function handleSuccessfulPayment(paymentIntent) {
 }
 
 /* ======================
-   STRIPE WEBHOOK
+   STRIPE WEBHOOK (LIVE/TEST)
 ====================== */
 app.post("/webhook", express.raw({ type: "application/json" }), async (req, res) => {
+  const sig = req.headers["stripe-signature"];
+  let event;
+
   try {
-    const signature = req.headers["stripe-signature"];
-    const event = stripe.webhooks.constructEvent(
-      req.body,
-      signature,
-      process.env.STRIPE_WEBHOOK_SECRET
-    );
-
-    if (event.type === "payment_intent.succeeded") {
-      await handleSuccessfulPayment(event.data.object);
-    }
-
-    res.json({ received: true });
-  } catch {
-    res.status(400).send("Webhook Error");
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    console.log("❌ Webhook signature verification failed:", err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
   }
+
+  // Handle only the successful payment_intent
+  if (event.type === "payment_intent.succeeded") {
+    const paymentIntent = event.data.object;
+    console.log(`💰 PaymentIntent succeeded: ${paymentIntent.id}`);
+    await handleSuccessfulPayment(paymentIntent);
+  }
+
+  res.json({ received: true });
 });
 
 /* ======================
@@ -176,7 +175,6 @@ function calculateTotal(items, days) {
     0
   );
 }
-
 function calculateItemPrice(item) {
   const pricing = { "Lightning Box": 35, "Winter Box": 25, "Sun Thieves": 30, "Snuggle Seat": 12 };
   const lower = item.toLowerCase();
@@ -188,32 +186,11 @@ function calculateItemPrice(item) {
   if (lower.includes("inquisitive")) price -= 10;
   return price;
 }
-
 function getMultiplier(item, days) {
   const lower = item.toLowerCase();
   if (lower.includes("delivery") || lower.includes("d20") || lower.includes("inquisitive")) return 1;
   return days;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -366,6 +343,7 @@ app.listen(PORT, async () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
   await startupChecks();
 });
+
 
 
 
