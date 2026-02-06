@@ -170,6 +170,7 @@ app.use(express.urlencoded({ extended: true }));
 ====================== */
 app.post("/create-payment-intent", async (req, res) => {
   if (!validateOrder(req.body)) {
+    console.error("❌ Invalid order payload:", req.body);
     return res.status(400).json({ error: "Invalid order payload" });
   }
 
@@ -421,6 +422,7 @@ app.listen(PORT, async () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
   await startupChecks();
 });
+
 
 
 
