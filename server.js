@@ -57,20 +57,6 @@ async function startupChecks() {
   if (!process.env.ADMIN_EMAIL) console.warn("❌ Admin email missing!");
   else console.log("✅ Admin email loaded");
 
-  // Test Brevo
-  if (process.env.BREVO_API_KEY && process.env.BREVO_SENDER && process.env.ADMIN_EMAIL) {
-    try {
-      await sendBrevoEmail({
-        sender: { email: process.env.BREVO_SENDER, name: "Festi Besti" },
-        to: [{ email: process.env.ADMIN_EMAIL, name: "Admin" }],
-        subject: "Startup Email Test",
-        htmlContent: "<p>✅ Brevo is working on startup</p>",
-      });
-      console.log("✅ Brevo test email sent successfully");
-    } catch (err) {
-      console.warn("⚠️ Brevo test email failed:", err.message);
-    }
-  }
 
   console.log("======================\n");
 }
@@ -380,6 +366,7 @@ app.listen(PORT, async () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
   await startupChecks();
 });
+
 
 
 
