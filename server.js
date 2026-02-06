@@ -15,80 +15,65 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 /* ======================
-   BREVO EMAIL
+   BREVO EMAIL SENDER
 ====================== */
 async function sendBrevoEmail(payload) {
-  return axios.post(
-    "https://api.brevo.com/v3/smtp/email",
-    payload,
-    {
-      headers: {
-        "api-key": process.env.BREVO_API_KEY,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      timeout: 10_000,
-    }
-  );
+  try {
+    const res = await axios.post(
+      "https://api.brevo.com/v3/smtp/email",
+      payload,
+      {
+        headers: {
+          "api-key": process.env.BREVO_API_KEY,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        timeout: 10_000,
+      }
+    );
+    return res.data;
+  } catch (err) {
+    throw new Error(
+      `Brevo email failed: ${err.response?.status || ""} ${JSON.stringify(err.response?.data || err.message)}`
+    );
+  }
 }
 
 /* ======================
    STARTUP CHECKS
 ====================== */
-async function runStartupChecks() {
+async function startupChecks() {
   console.log("\n=== STARTUP CHECKS ===");
 
-  // Env keys
-  const keys = {
-    STRIPE: process.env.STRIPE_SECRET_KEY,
-    BREVO_KEY: process.env.BREVO_API_KEY,
-    BREVO_SENDER: process.env.BREVO_SENDER,
-    ADMIN_EMAIL: process.env.ADMIN_EMAIL,
-  };
-  for (const [name, value] of Object.entries(keys)) {
-    console.log(`${name}:`, value ? "Loaded ✅" : "Missing ❌");
-  }
+  if (!process.env.STRIPE_SECRET_KEY) console.warn("❌ Stripe key missing!");
+  else console.log("✅ Stripe key loaded");
 
-  // Brevo test email
-  try {
-    if (keys.BREVO_KEY && keys.BREVO_SENDER && keys.ADMIN_EMAIL) {
+  if (!process.env.BREVO_API_KEY) console.warn("❌ Brevo API key missing!");
+  else console.log("✅ Brevo API key loaded");
+
+  if (!process.env.BREVO_SENDER) console.warn("❌ Brevo sender missing!");
+  else console.log("✅ Brevo sender loaded");
+
+  if (!process.env.ADMIN_EMAIL) console.warn("❌ Admin email missing!");
+  else console.log("✅ Admin email loaded");
+
+  // Test Brevo
+  if (process.env.BREVO_API_KEY && process.env.BREVO_SENDER && process.env.ADMIN_EMAIL) {
+    try {
       await sendBrevoEmail({
-        sender: { email: keys.BREVO_SENDER, name: "Festi Besti" },
-        to: [{ email: keys.ADMIN_EMAIL, name: "Admin" }],
-        subject: "Startup Test Email",
-        htmlContent: "<p>Brevo check successful ✅</p>",
+        sender: { email: process.env.BREVO_SENDER, name: "Festi Besti" },
+        to: [{ email: process.env.ADMIN_EMAIL, name: "Admin" }],
+        subject: "Startup Email Test",
+        htmlContent: "<p>✅ Brevo is working on startup</p>",
       });
-      console.log("Brevo email test: ✅ Passed");
-    } else {
-      console.log("Brevo email test: ⚠️ Skipped (missing keys)");
+      console.log("✅ Brevo test email sent successfully");
+    } catch (err) {
+      console.warn("⚠️ Brevo test email failed:", err.message);
     }
-  } catch {
-    console.log("Brevo email test: ❌ Failed (check API key & sender)");
-  }
-
-  // Stripe test
-  try {
-    if (keys.STRIPE) {
-      await stripe.paymentIntents.create({
-        amount: 1,
-        currency: "usd",
-        payment_method_types: ["card"],
-      });
-      console.log("Stripe API test: ✅ Passed");
-    } else {
-      console.log("Stripe API test: ⚠️ Skipped (missing key)");
-    }
-  } catch {
-    console.log("Stripe API test: ❌ Failed");
   }
 
   console.log("======================\n");
 }
-
-
-
-
-
 
 /* ======================
    TEST EMAIL ENDPOINT
@@ -107,14 +92,72 @@ app.get("/test-email", async (req, res) => {
   }
 });
 
+/* ======================
+   ORDER VALIDATION
+====================== */
+function validateOrderPayload(body) {
+  const { selections, days, customer } = body;
+  if (!Array.isArray(selections) || !selections.length) return false;
+  if (!Number.isInteger(days) || days < 1 || days > 30) return false;
+  if (!customer?.email || !customer.email.includes("@")) return false;
+  return true;
+}
 
 
+/* ======================
+   PAYMENT INTENT
+====================== */
+app.post("/create-payment-intent", async (req, res) => {
+  try {
+    if (!validateOrderPayload(req.body)) return res.status(400).json({ error: "Invalid order data" });
 
+    const { selections, days, customer } = req.body;
+    const amount = calculateTotal(selections, days);
 
+    const intent = await stripe.paymentIntents.create({
+      amount,
+      currency: "usd",
+      receipt_email: customer.email,
+      automatic_payment_methods: { enabled: true },
+      metadata: { order: JSON.stringify(req.body) },
+    }, { idempotencyKey: crypto.randomUUID() });
 
+    res.json({ clientSecret: intent.client_secret });
+  } catch (err) {
+    console.warn("PaymentIntent error:", err.message); // minimal logs
+    res.status(500).json({ error: "Payment processing failed" });
+  }
+});
 
+/* ======================
+   HANDLE PAYMENT SUCCESS
+====================== */
+async function handleSuccessfulPayment(paymentIntent) {
+  try {
+    const data = JSON.parse(paymentIntent.metadata.order || "{}");
+    const customer = data.customer || {};
+    const order = data;
+    const sender = { email: process.env.BREVO_SENDER, name: "Festi Besti" };
 
+    await sendBrevoEmail({
+      sender,
+      to: [{ email: customer.email, name: customer.name }],
+      subject: "Payment Received – Your Rental Invoice",
+      htmlContent: customerEmailTemplate(paymentIntent, order, customer),
+    });
 
+    await sendBrevoEmail({
+      sender,
+      to: [{ email: process.env.ADMIN_EMAIL, name: "Admin" }],
+      subject: "New Paid Order",
+      htmlContent: adminEmailTemplate(paymentIntent, order, customer),
+    });
+
+    console.log(`✅ Emails sent for payment ${paymentIntent.id}`);
+  } catch (err) {
+    console.warn("⚠️ Payment email error:", err.message);
+  }
+}
 
 /* ======================
    STRIPE WEBHOOK
@@ -133,100 +176,30 @@ app.post("/webhook", express.raw({ type: "application/json" }), async (req, res)
     }
 
     res.json({ received: true });
-  } catch (err) {
-    // Minimal logging
+  } catch {
     res.status(400).send("Webhook Error");
   }
 });
 
 /* ======================
-   PAYMENT LOGIC
-====================== */
-function validateOrderPayload(body) {
-  const { selections, days, customer } = body;
-  if (!Array.isArray(selections) || !selections.length) throw new Error("Invalid selections");
-  if (!Number.isInteger(days) || days < 1 || days > 30) throw new Error("Invalid rental duration");
-  if (!customer?.email || !customer.email.includes("@")) throw new Error("Invalid customer email");
-}
-
-app.post("/create-payment-intent", async (req, res) => {
-  try {
-    validateOrderPayload(req.body);
-    const { selections, days, customer } = req.body;
-    const amount = calculateTotal(selections, days);
-
-    const intent = await stripe.paymentIntents.create(
-      {
-        amount,
-        currency: "usd",
-        receipt_email: customer.email,
-        automatic_payment_methods: { enabled: true },
-        metadata: {
-          order: JSON.stringify(req.body),
-        },
-      },
-      { idempotencyKey: crypto.randomUUID() }
-    );
-
-    res.json({ clientSecret: intent.client_secret });
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
-async function handleSuccessfulPayment(paymentIntent) {
-  try {
-    const data = JSON.parse(paymentIntent.metadata.order || "{}");
-    const customer = data.customer || {};
-    const order = data;
-
-    const sender = { email: process.env.BREVO_SENDER, name: "Festi Besti" };
-
-    // Send emails silently
-    await sendBrevoEmail({
-      sender,
-      to: [{ email: customer.email, name: customer.name }],
-      subject: "Payment Received – Your Rental Invoice",
-      htmlContent: customerEmailTemplate(paymentIntent, order, customer),
-    });
-
-    await sendBrevoEmail({
-      sender,
-      to: [{ email: process.env.ADMIN_EMAIL, name: "Admin" }],
-      subject: "New Paid Order",
-      htmlContent: adminEmailTemplate(paymentIntent, order, customer),
-    });
-
-  } catch {
-    // Suppress errors in production
-  }
-}
-
-/* ======================
    PRICING LOGIC
 ====================== */
 function calculateTotal(items, days) {
-  let total = 0;
-  items.forEach(item => total += calculateItemPrice(item) * getMultiplier(item, days));
-  return Math.max(total * 100, 0);
+  return Math.max(
+    items.reduce((sum, item) => sum + calculateItemPrice(item) * getMultiplier(item, days), 0) * 100,
+    0
+  );
 }
 
 function calculateItemPrice(item) {
-  const pricing = {
-    "Lightning Box": 35,
-    "Winter Box": 25,
-    "Sun Thieves": 30,
-    "Snuggle Seat": 12,
-  };
+  const pricing = { "Lightning Box": 35, "Winter Box": 25, "Sun Thieves": 30, "Snuggle Seat": 12 };
   const lower = item.toLowerCase();
   let price = 0;
-
-  const key = Object.keys(pricing).find(p => lower.includes(p.toLowerCase()));
+  const key = Object.keys(pricing).find((p) => lower.includes(p.toLowerCase()));
   if (key) price += pricing[key];
   if (lower.includes("delivery")) price += 6;
   if (lower.includes("d20")) price += 20;
   if (lower.includes("inquisitive")) price -= 10;
-
   return price;
 }
 
@@ -235,6 +208,26 @@ function getMultiplier(item, days) {
   if (lower.includes("delivery") || lower.includes("d20") || lower.includes("inquisitive")) return 1;
   return days;
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -385,7 +378,7 @@ app.get("/", (req, res) => res.send("Server running (Stripe + Brevo TEST MODE)")
 const PORT = process.env.PORT || 4242;
 app.listen(PORT, async () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
-  await runStartupChecks();
+  await startupChecks();
 });
 
 
