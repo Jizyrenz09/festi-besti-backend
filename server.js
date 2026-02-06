@@ -3,63 +3,107 @@ const crypto = require("crypto");
 const express = require("express");
 const cors = require("cors");
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
-
-// ✅ CORRECT BREVO IMPORT
 const Brevo = require("@getbrevo/brevo");
 
-// ======================
-// INIT BREVO (CORRECT)
-// ======================
+const app = express();
+
+/* ======================
+   BREVO INIT
+====================== */
 const brevoClient = new Brevo.TransactionalEmailsApi();
 brevoClient.setApiKey(
   Brevo.TransactionalEmailsApiApiKeys.apiKey,
   process.env.BREVO_API_KEY
 );
 
-const app = express();
-
 /* ======================
    SERVICE STATUS
 ====================== */
-console.log("=== SERVICE STATUS ===");
+console.log("\n=== SERVICE STATUS ===");
 console.log("Stripe Key:", process.env.STRIPE_SECRET_KEY ? "Loaded ✅" : "Missing ❌");
 console.log("Brevo API Key:", process.env.BREVO_API_KEY ? "Loaded ✅" : "Missing ❌");
+console.log("Brevo Sender:", process.env.BREVO_SENDER || "❌ Missing");
+console.log("Admin Email:", process.env.ADMIN_EMAIL || "❌ Missing");
+console.log("======================\n");
 
-/* ====================== GLOBAL MIDDLEWARE ====================== */
+/* ======================
+   GLOBAL MIDDLEWARE
+====================== */
 app.use(cors({ origin: "http://yourfestibesti.com" }));
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-/* ====================== STRIPE WEBHOOK (RAW BODY) ====================== */
-app.post(
-  "/webhook",
-  express.raw({ type: "application/json" }),
-  async (req, res) => {
-    let event;
-    try {
-      const signature = req.headers["stripe-signature"];
-      event = stripe.webhooks.constructEvent(
-        req.body,
-        signature,
-        process.env.STRIPE_WEBHOOK_SECRET
-      );
-    } catch (err) {
-      console.error("❌ Webhook signature failed:", err.message);
-      return res.status(400).send("Webhook Error");
-    }
+/* ======================
+   STRIPE WEBHOOK
+====================== */
+app.post("/webhook", express.raw({ type: "application/json" }), async (req, res) => {
+  try {
+    const signature = req.headers["stripe-signature"];
+    const event = stripe.webhooks.constructEvent(
+      req.body,
+      signature,
+      process.env.STRIPE_WEBHOOK_SECRET
+    );
 
     if (event.type === "payment_intent.succeeded") {
       await handleSuccessfulPayment(event.data.object);
     }
 
     res.json({ received: true });
+  } catch (err) {
+    console.error("❌ Stripe Webhook Error:", err.message);
+    res.status(400).send("Webhook Error");
   }
-);
-
-/* ====================== JSON (NON-WEBHOOK ROUTES) ====================== */
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+});
 
 /* ======================
-   TEST EMAIL ENDPOINT (WORKING)
+   BREVO ERROR INSPECTOR
+====================== */
+function logBrevoError(err, context = "Brevo") {
+  console.error(`\n❌ ${context} ERROR`);
+
+  if (!err) {
+    console.error("Unknown error (no error object)");
+    return;
+  }
+
+  // Axios-style response from Brevo SDK
+  const status = err?.response?.status;
+  const body = err?.response?.body;
+
+  console.error("HTTP Status:", status || "N/A");
+
+  if (body) {
+    console.error("Brevo Response Body:", JSON.stringify(body, null, 2));
+
+    const message = body.message || body.error || "";
+
+    if (status === 401) {
+      console.error("➡️  INVALID API KEY (401 Unauthorized)");
+    }
+
+    if (status === 403) {
+      console.error("➡️  UNAUTHORIZED / FORBIDDEN (403)");
+    }
+
+    if (message.includes("sender")) {
+      console.error("➡️  SENDER EMAIL NOT VERIFIED OR BLOCKED");
+    }
+
+    if (message.includes("not allowed")) {
+      console.error("➡️  RECIPIENT EMAIL NOT ALLOWED (Sandbox / Trial Mode)");
+    }
+  } else {
+    console.error("Error Message:", err.message);
+  }
+
+  console.error("FULL ERROR OBJECT:");
+  console.error(JSON.stringify(err, null, 2));
+  console.error("================================\n");
+}
+
+/* ======================
+   TEST EMAIL ENDPOINT
 ====================== */
 app.get("/test-email", async (req, res) => {
   try {
@@ -78,32 +122,27 @@ app.get("/test-email", async (req, res) => {
 
     res.send("✅ Test email sent");
   } catch (err) {
-    console.error("❌ Test email failed:", err?.response?.body || err.message);
-    console.error("FULL ERROR OBJECT:", JSON.stringify(err, null, 2));
+    logBrevoError(err, "TEST EMAIL");
     res.status(500).send("❌ Test email failed");
   }
 });
 
 /* ======================
-   CREATE PAYMENT INTENT
+   PAYMENT INTENT
 ====================== */
 function validateOrderPayload(body) {
   const { selections, days, customer } = body;
-  if (!Array.isArray(selections) || selections.length === 0)
-    throw new Error("Invalid selections");
-  if (!Number.isInteger(days) || days < 1 || days > 30)
-    throw new Error("Invalid rental duration");
-  if (!customer?.email || !customer.email.includes("@"))
-    throw new Error("Valid customer email required");
+  if (!Array.isArray(selections) || !selections.length) throw new Error("Invalid selections");
+  if (!Number.isInteger(days) || days < 1 || days > 30) throw new Error("Invalid rental duration");
+  if (!customer?.email || !customer.email.includes("@")) throw new Error("Invalid customer email");
 }
 
 app.post("/create-payment-intent", async (req, res) => {
   try {
     validateOrderPayload(req.body);
-    const { selections, startDate, endDate, days, customer } = req.body;
 
+    const { selections, days, customer } = req.body;
     const amount = calculateTotal(selections, days);
-    if (amount <= 0) throw new Error("Invalid payment amount");
 
     const intent = await stripe.paymentIntents.create(
       {
@@ -112,8 +151,7 @@ app.post("/create-payment-intent", async (req, res) => {
         receipt_email: customer.email,
         automatic_payment_methods: { enabled: true },
         metadata: {
-          order: JSON.stringify({ selections, startDate, endDate, days }),
-          customer: JSON.stringify(customer),
+          order: JSON.stringify(req.body),
         },
       },
       { idempotencyKey: crypto.randomUUID() }
@@ -121,51 +159,44 @@ app.post("/create-payment-intent", async (req, res) => {
 
     res.json({ clientSecret: intent.client_secret });
   } catch (err) {
-    console.error("❌ PaymentIntent error:", err.message);
+    console.error("❌ PaymentIntent Error:", err.message);
     res.status(400).json({ error: err.message });
   }
 });
 
 /* ======================
-   HANDLE SUCCESSFUL PAYMENT
+   SUCCESSFUL PAYMENT
 ====================== */
 async function handleSuccessfulPayment(paymentIntent) {
   try {
-    const order = JSON.parse(paymentIntent.metadata.order || "{}");
-    const customer = JSON.parse(paymentIntent.metadata.customer || "{}");
+    const data = JSON.parse(paymentIntent.metadata.order || "{}");
+    const customer = data.customer || {};
 
-    const baseEmail = {
-      sender: { email: process.env.BREVO_SENDER, name: "Festi Besti" },
-    };
+    const sender = { email: process.env.BREVO_SENDER, name: "Festi Besti" };
 
-    // === CUSTOMER EMAIL ===
     await brevoClient.sendTransacEmail(
       new Brevo.SendSmtpEmail({
-        ...baseEmail,
-        to: [{ email: customer.email, name: customer.name }],
-        subject: "Payment Received – Your Rental Invoice",
-        htmlContent: customerEmailTemplate(paymentIntent, order, customer),
+        sender,
+        to: [{ email: customer.email }],
+        subject: "Payment Received",
+        htmlContent: "<p>Thank you for your order!</p>",
       })
     );
 
-    // === ADMIN EMAIL ===
     await brevoClient.sendTransacEmail(
       new Brevo.SendSmtpEmail({
-        ...baseEmail,
-        to: [{ email: process.env.ADMIN_EMAIL, name: "Admin" }],
+        sender,
+        to: [{ email: process.env.ADMIN_EMAIL }],
         subject: "New Paid Order",
-        htmlContent: adminEmailTemplate(paymentIntent, order, customer),
+        htmlContent: "<p>New order received.</p>",
       })
     );
 
     console.log(`✅ Emails sent for payment ${paymentIntent.id}`);
   } catch (err) {
-    console.error("❌ Email send error:", err?.response?.body || err.message);
+    logBrevoError(err, "PAYMENT EMAIL");
   }
 }
-
-
-
 
 
 
@@ -378,6 +409,7 @@ const PORT = process.env.PORT || 4242;
 app.listen(PORT, () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
 });
+
 
 
 
