@@ -16,6 +16,12 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 /* ======================
+   GLOBAL LOGS / CHECKERS
+====================== */
+let lastWebhook = null;   // store last Stripe webhook event info
+let lastEmailLog = null;  // store last email sending info
+
+/* ======================
    BREVO EMAIL SENDER
 ====================== */
 async function sendBrevoEmail(payload) {
@@ -33,9 +39,11 @@ async function sendBrevoEmail(payload) {
       }
     );
     console.log("📨 Brevo email sent:", payload.subject);
+    lastEmailLog = { time: new Date().toISOString(), subject: payload.subject, to: payload.to.map(t => t.email) };
     return res.data;
   } catch (err) {
     console.error("❌ Brevo email failed:", err.response?.data || err.message);
+    lastEmailLog = { time: new Date().toISOString(), error: err.response?.data || err.message };
     throw err;
   }
 }
@@ -46,7 +54,7 @@ async function sendBrevoEmail(payload) {
 async function startupChecks() {
   console.log("\n=== STARTUP CHECKS ===");
   console.log(process.env.STRIPE_SECRET_KEY ? "✅ Stripe key loaded" : "❌ Stripe key missing!");
-  console.log(process.env.BREVO_API_KEY ? "✅ Brevo key loaded" : "❌ Brevo API key missing!");
+  console.log(process.env.BREVO_API_KEY ? "✅ Brevo key loaded" : "❌ Brevo key missing!");
   console.log(process.env.BREVO_SENDER ? "✅ Brevo sender loaded" : "❌ Brevo sender missing!");
   console.log(process.env.ADMIN_EMAIL ? "✅ Admin email loaded" : "❌ Admin email missing!");
   console.log(process.env.STRIPE_WEBHOOK_SECRET ? "✅ Stripe webhook secret loaded" : "❌ Stripe webhook secret missing!");
@@ -68,6 +76,18 @@ app.get("/test-email", async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: "❌ Test email failed", details: err.response?.data || err.message });
   }
+});
+
+/* ======================
+   WEBHOOK / EMAIL CHECKERS
+====================== */
+app.get("/webhook-health", (req, res) => {
+  res.json({
+    status: "ok",
+    lastWebhook,
+    lastEmailLog,
+    timestamp: new Date().toISOString(),
+  });
 });
 
 /* ======================
@@ -101,7 +121,7 @@ app.post("/create-payment-intent", async (req, res) => {
 });
 
 /* ======================
-   HANDLE PAYMENT SUCCESS WITH LOGS
+   HANDLE PAYMENT SUCCESS
 ====================== */
 async function handleSuccessfulPayment(paymentIntent) {
   const logs = { paymentIntentId: paymentIntent.id, emailCustomer: false, emailAdmin: false };
@@ -119,12 +139,8 @@ async function handleSuccessfulPayment(paymentIntent) {
   const customer = order.customer || {};
   const sender = { email: process.env.BREVO_SENDER, name: "Festi Besti" };
 
-  if (!customer.email) {
-    console.error("❌ Customer email missing!");
-    throw new Error("Customer email missing");
-  }
+  if (!customer.email) throw new Error("Customer email missing");
 
-  // Send email to customer
   try {
     console.log("✉️ Sending email to customer:", customer.email);
     await sendBrevoEmail({
@@ -134,12 +150,10 @@ async function handleSuccessfulPayment(paymentIntent) {
       htmlContent: customerEmailTemplate(paymentIntent, order, customer),
     });
     logs.emailCustomer = true;
-    console.log("✅ Customer email sent successfully");
   } catch (err) {
     console.error("❌ Customer email failed:", err.response?.data || err.message);
   }
 
-  // Send email to admin
   try {
     console.log("✉️ Sending email to admin:", process.env.ADMIN_EMAIL);
     await sendBrevoEmail({
@@ -149,7 +163,6 @@ async function handleSuccessfulPayment(paymentIntent) {
       htmlContent: adminEmailTemplate(paymentIntent, order, customer),
     });
     logs.emailAdmin = true;
-    console.log("✅ Admin email sent successfully");
   } catch (err) {
     console.error("❌ Admin email failed:", err.response?.data || err.message);
   }
@@ -162,7 +175,7 @@ async function handleSuccessfulPayment(paymentIntent) {
    STRIPE WEBHOOK
 ====================== */
 app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, res) => {
-  console.log("🔔 Webhook triggered");
+  console.log("🔔 Webhook triggered at", new Date().toISOString());
 
   const sig = req.headers["stripe-signature"];
   let event;
@@ -170,8 +183,10 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, r
   try {
     event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
     console.log("✅ Webhook signature verified:", event.type);
+    lastWebhook = { time: new Date().toISOString(), type: event.type };
   } catch (err) {
     console.error("❌ Webhook signature verification failed:", err.message);
+    lastWebhook = { time: new Date().toISOString(), error: err.message };
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
@@ -181,9 +196,10 @@ app.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, r
 
     try {
       const logs = await handleSuccessfulPayment(paymentIntent);
+      lastWebhook.logs = logs;
       console.log("📊 Payment success logs:", logs);
     } catch (err) {
-      console.error("❌ Error in handling successful payment:", err);
+      console.error("❌ Error handling payment:", err);
       return res.status(500).send("Internal server error");
     }
   } else {
@@ -229,8 +245,6 @@ function getMultiplier(item, days) {
   if (lower.includes("delivery") || lower.includes("d20") || lower.includes("inquisitive")) return 1;
   return days;
 }
-
-
 
 
 
@@ -402,6 +416,7 @@ app.listen(PORT, async () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
   await startupChecks();
 });
+
 
 
 
