@@ -79,6 +79,7 @@ app.get("/test-email", async (req, res) => {
     res.send("✅ Test email sent");
   } catch (err) {
     console.error("❌ Test email failed:", err?.response?.body || err.message);
+    console.error("FULL ERROR OBJECT:", JSON.stringify(err, null, 2));
     res.status(500).send("❌ Test email failed");
   }
 });
@@ -377,5 +378,6 @@ const PORT = process.env.PORT || 4242;
 app.listen(PORT, () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
 });
+
 
 
