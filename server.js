@@ -14,23 +14,40 @@ const app = express();
 let lastWebhook = null;
 let lastEmailLog = null;
 
+
+
+
+
 /* ======================
    PRICE CONFIG (SINGLE SOURCE OF TRUTH)
 ====================== */
-const PRICE_CATALOG = {
-  "lightning-box": 35,
+const PRODUCT_PRICES = {
   "winter-box": 25,
+  "lightning-box": 35,
   "sun-thieves": 30,
   "snuggle-seat": 12,
 };
 
-const DISCOUNTS = {
-  MAP10: { type: "percent", value: 10 },
-  VIP50: { type: "flat", value: 50 },
+const DELIVERY_FEES = {
+  Oakland: 5.0,
+  Berkeley: 6.0,
+  Emeryville: 6.5,
+  Piedmont: 5.5,
+  "San Francisco": 12.0,
+  Alameda: 6.0,
+  "San Leandro": 7.5,
+  Albany: 7.0,
+  "El Cerrito": 8.0,
+  Richmond: 9.0,
 };
 
-const DELIVERY_FEE = 6;
+const D20_PRICE = 20;       // one-time
+const INQUISITIVE_DISCOUNT = 10; // one-time flat discount
 const MAX_DAYS = 30;
+
+
+
+
 
 /* ======================
    BREVO EMAIL SENDER
@@ -79,21 +96,30 @@ async function startupChecks() {
   console.log("======================\n");
 }
 
+
+
+
+
 /* ======================
    ORDER VALIDATION (STRICT)
 ====================== */
-function validateOrder(body) {
-  if (!Array.isArray(body.items) || !body.items.length) return false;
-  if (!Number.isInteger(body.days) || body.days < 1 || body.days > MAX_DAYS) return false;
-  if (!body.customer?.email?.includes("@")) return false;
+function validateOrder(order) {
+  if (!Array.isArray(order.items) || order.items.length === 0) return false;
+  if (!Number.isInteger(order.days) || order.days < 1 || order.days > MAX_DAYS) return false;
+  if (!order.customer?.email?.includes("@")) return false;
 
-  for (const item of body.items) {
-    if (!PRICE_CATALOG[item.id]) return false;
+  for (const item of order.items) {
+    if (!PRODUCT_PRICES[item.id]) return false;
     if (!Number.isInteger(item.quantity) || item.quantity < 1) return false;
   }
 
+  if (order.deliveryCity && !DELIVERY_FEES[order.deliveryCity]) return false;
+
   return true;
 }
+
+
+
 
 /* ======================
    PRICING ENGINE (BACKEND ONLY)
@@ -101,30 +127,36 @@ function validateOrder(body) {
 function calculateOrderTotal(order) {
   let subtotal = 0;
 
+  // Product pricing (per day)
   for (const item of order.items) {
-    const pricePerDay = PRICE_CATALOG[item.id];
+    const pricePerDay = PRODUCT_PRICES[item.id];
     subtotal += pricePerDay * item.quantity * order.days;
   }
 
-  let discountTotal = 0;
-  for (const d of order.discounts || []) {
-    const def = DISCOUNTS[d.code];
-    if (!def) continue;
+  // Delivery (one-time)
+  const deliveryFee = order.deliveryCity
+    ? DELIVERY_FEES[order.deliveryCity]
+    : 0;
 
-    if (def.type === "percent") {
-      discountTotal += subtotal * (def.value / 100);
-    } else {
-      discountTotal += def.value;
-    }
+  // Offers
+  let offersTotal = 0;
+  if (order.offers?.d20) {
+    offersTotal += D20_PRICE;
   }
 
-  const delivery = order.delivery?.enabled ? DELIVERY_FEE : 0;
-  const total = Math.max(subtotal - discountTotal + delivery, 0);
+  // Discounts
+  let discountTotal = 0;
+  if (order.offers?.inquisitive) {
+    discountTotal += INQUISITIVE_DISCOUNT;
+  }
+
+  const total = Math.max(subtotal + deliveryFee + offersTotal - discountTotal, 0);
 
   return {
     subtotal,
+    deliveryFee,
+    offersTotal,
     discountTotal,
-    delivery,
     total,
     amountCents: Math.round(total * 100),
   };
@@ -281,127 +313,130 @@ app.get("/webhook-health", (req, res) => {
 
 
 
-
 /* ======================
-   EMAIL TEMPLATES (EXACT LIKE WEBSITE INVOICE)
+   EMAIL TEMPLATES (AUTHORITATIVE)
 ====================== */
-function generateRows(order) {
+
+function buildInvoiceRows(order) {
   const rows = [];
-  const days = order.days || 1;
+  const pricing = order.pricing;
 
-  order.selections.forEach((item) => {
-    const lower = item.toLowerCase();
-    let subtotal;
-    let rate;
-
-    if (lower.includes("delivery")) {
-      rate = "";
-      subtotal = "$" + calculateItemPrice(item, 1).toFixed(2); // pass 1 day for one-time
-    } else if (lower.includes("d20")) {
-      rate = "";
-      subtotal = "$" + calculateItemPrice(item, 1).toFixed(2); // pass 1 day for one-time
-    } else if (lower.includes("inquisitive")) {
-      rate = "";
-      subtotal = "-$" + Math.abs(calculateItemPrice(item, 1)).toFixed(2);
-    } else {
-      rate = "$" + calculateItemPrice(item, 1).toFixed(2);
-      subtotal = "$" + (calculateItemPrice(item) * days).toFixed(2);
-    }
+  // Product rows
+  for (const item of order.items) {
+    const pricePerDay = PRODUCT_PRICES[item.id];
+    const subtotal = pricePerDay * item.quantity * order.days;
 
     rows.push(`
       <tr>
-        <td style="padding:5px 10px;border:1px solid #ddd;">${item}</td>
-        <td style="padding:5px 10px;border:1px solid #ddd;">${rate}</td>
-        <td>${lower.includes("delivery") || lower.includes("d20") || lower.includes("inquisitive") ? "-" : days}</td>
-        <td style="padding:5px 10px;border:1px solid #ddd;">${subtotal}</td>
+        <td>${formatProductName(item.id)}</td>
+        <td>$${pricePerDay.toFixed(2)}</td>
+        <td>${item.quantity} × ${order.days} days</td>
+        <td>$${subtotal.toFixed(2)}</td>
       </tr>
     `);
-  });
+  }
+
+  // Delivery
+  if (pricing.deliveryFee > 0) {
+    rows.push(`
+      <tr>
+        <td>Delivery (${order.deliveryCity})</td>
+        <td>-</td>
+        <td>-</td>
+        <td>$${pricing.deliveryFee.toFixed(2)}</td>
+      </tr>
+    `);
+  }
+
+  // D20 Offer
+  if (order.offers?.d20) {
+    rows.push(`
+      <tr>
+        <td>Roll a Crit on a D20</td>
+        <td>-</td>
+        <td>-</td>
+        <td>$${D20_PRICE.toFixed(2)}</td>
+      </tr>
+    `);
+  }
+
+  // Discount
+  if (order.offers?.inquisitive) {
+    rows.push(`
+      <tr>
+        <td>Inquisitive Discount</td>
+        <td>-</td>
+        <td>-</td>
+        <td>-$${INQUISITIVE_DISCOUNT.toFixed(2)}</td>
+      </tr>
+    `);
+  }
 
   return rows.join("");
 }
 
-function customerEmailTemplate(pi, order, customer) {
-  const totalAmount = (pi.amount / 100).toFixed(2);
-  const rows = generateRows(order);
+function formatProductName(id) {
+  return id
+    .split("-")
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
+function customerEmailTemplate(pi, order) {
+  const pricing = order.pricing;
+  const rows = buildInvoiceRows(order);
 
   return `
   <html>
     <head>
       <style>
-        body { font-family: Arial, sans-serif; color: #333; line-height:1.4; }
-        table { border-collapse: collapse; width:100%; margin-top:10px; }
+        body { font-family: Arial, sans-serif; color: #333; }
+        table { border-collapse: collapse; width:100%; margin-top:15px; }
         th, td { border:1px solid #ddd; padding:8px; text-align:left; }
-        th { background-color: #f4f4f4; }
-        .total { font-weight:bold; font-size:1.1em; }
+        th { background-color:#f4f4f4; }
+        .total { font-weight:bold; font-size:16px; }
       </style>
     </head>
     <body>
-      <h2>Thank you for your payment, ${customer.name}!</h2>
-      <p>Your rental invoice details:</p>
+      <h2>Payment Received</h2>
+      <p>Hi ${order.customer.name || "Customer"},</p>
+      <p>Thank you for your rental booking.</p>
 
-      <h3>Rental Dates</h3>
-      <p>${order.startDate} → ${order.endDate} (${order.days} days)</p>
+      <p><strong>Rental Duration:</strong> ${order.days} day(s)</p>
+      <p><strong>Delivery City:</strong> ${order.deliveryCity || "Pickup"}</p>
 
-      <h3>Items & Charges</h3>
       <table>
         <thead>
-          <tr><th>Item</th><th>Rate</th><th>Days</th><th>Subtotal</th></tr>
+          <tr>
+            <th>Item</th>
+            <th>Rate</th>
+            <th>Details</th>
+            <th>Subtotal</th>
+          </tr>
         </thead>
         <tbody>
           ${rows}
         </tbody>
       </table>
 
-      <p class="total">Total Paid: $${totalAmount}</p>
+      <p><strong>Subtotal:</strong> $${pricing.subtotal.toFixed(2)}</p>
+      <p><strong>Delivery:</strong> $${pricing.deliveryFee.toFixed(2)}</p>
+      <p><strong>Offers:</strong> $${pricing.offersTotal.toFixed(2)}</p>
+      <p><strong>Discounts:</strong> -$${pricing.discountTotal.toFixed(2)}</p>
+
+      <p class="total">Total Paid: $${(pi.amount / 100).toFixed(2)}</p>
+
       <p><strong>Payment ID:</strong> ${pi.id}</p>
-      <hr>
-      <p>Questions? Reply to this email.</p>
+      <hr/>
+      <p>If you have any questions, reply to this email.</p>
     </body>
   </html>
   `;
 }
 
-function adminEmailTemplate(pi, order, customer) {
-  const totalAmount = (pi.amount / 100).toFixed(2);
-  const rows = generateRows(order);
-
-  return `
-  <html>
-    <head>
-      <style>
-        body { font-family: Arial, sans-serif; color: #333; line-height:1.4; }
-        table { border-collapse: collapse; width:100%; margin-top:10px; }
-        th, td { border:1px solid #ddd; padding:8px; text-align:left; }
-        th { background-color: #f4f4f4; }
-        .total { font-weight:bold; font-size:1.1em; }
-      </style>
-    </head>
-    <body>
-      <h2>New Paid Order</h2>
-      <p><strong>Customer:</strong> ${customer.name}</p>
-      <p><strong>Email:</strong> ${customer.email}</p>
-      <p><strong>Phone:</strong> ${customer.phone || "N/A"}</p>
-      <p><strong>Rental Dates:</strong> ${order.startDate} → ${order.endDate} (${order.days} days)</p>
-
-      <h3>Items & Charges</h3>
-      <table>
-        <thead>
-          <tr><th>Item</th><th>Rate</th><th>Days</th><th>Subtotal</th></tr>
-        </thead>
-        <tbody>
-          ${rows}
-        </tbody>
-      </table>
-
-      <p class="total">Total Paid: $${totalAmount}</p>
-      <p><strong>Payment ID:</strong> ${pi.id}</p>
-    </body>
-  </html>
-  `;
+function adminEmailTemplate(pi, order) {
+  return customerEmailTemplate(pi, order);
 }
-
-
 
 
 
@@ -422,6 +457,7 @@ app.listen(PORT, async () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
   await startupChecks();
 });
+
 
 
 
