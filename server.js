@@ -243,11 +243,7 @@ async function handleSuccessfulPayment(paymentIntent) {
     sender: { email: process.env.BREVO_SENDER, name: "Festi Besti" },
     to: [{ email: order.customer.email, name: order.customer.name }],
     subject: "Payment Successful – Festi Besti",
-    htmlContent: `
-      <h2>Payment Received</h2>
-      <p>Total Paid: <strong>$${(paymentIntent.amount / 100).toFixed(2)}</strong></p>
-      <p>Thank you for your order.</p>
-    `,
+    htmlContent: customerEmailTemplate(paymentIntent, order),
   });
 }
 
@@ -457,6 +453,7 @@ app.listen(PORT, async () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
   await startupChecks();
 });
+
 
 
 
