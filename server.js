@@ -264,6 +264,36 @@ app.get("/test-email", async (req, res) => {
   }
 });
 
+
+/* ======================
+   Calculated Prices
+====================== */
+// TEST ORDER CALCULATION
+app.post("/calculate-prices", (req, res) => {
+  const order = req.body;
+
+  // Validate minimally
+  if (!order.items || !Array.isArray(order.items) || order.items.length === 0) {
+    return res.status(400).json({ error: "No items provided" });
+  }
+
+  // Calculate total using backend source of truth
+  const pricing = calculateOrderTotal(order);
+
+  res.json({
+    message: "✅ Prices calculated from backend",
+    pricing,
+  });
+});
+
+
+
+
+
+
+
+
+
 /* ======================
    HEALTH CHECK
 ====================== */
@@ -453,6 +483,7 @@ app.listen(PORT, async () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
   await startupChecks();
 });
+
 
 
 
