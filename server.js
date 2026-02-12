@@ -127,32 +127,41 @@ function validateOrder(order) {
 function calculateOrderTotal(order) {
   let subtotal = 0;
 
-  // Product pricing (per day)
-  for (const item of order.items) {
+  const items = order.items.map(item => {
     const pricePerDay = PRODUCT_PRICES[item.id];
-    subtotal += pricePerDay * item.quantity * order.days;
-  }
+    const itemSubtotal = pricePerDay * item.quantity * order.days;
 
-  // Delivery (one-time)
+    subtotal += itemSubtotal;
+
+    return {
+      id: item.id,
+      quantity: item.quantity,
+      pricePerDay,
+      subtotal: itemSubtotal,
+    };
+  });
+
   const deliveryFee = order.deliveryCity
-    ? DELIVERY_FEES[order.deliveryCity]
+    ? DELIVERY_FEES[order.deliveryCity] || 0
     : 0;
 
-  // Offers
   let offersTotal = 0;
   if (order.offers?.d20) {
     offersTotal += D20_PRICE;
   }
 
-  // Discounts
   let discountTotal = 0;
   if (order.offers?.inquisitive) {
     discountTotal += INQUISITIVE_DISCOUNT;
   }
 
-  const total = Math.max(subtotal + deliveryFee + offersTotal - discountTotal, 0);
+  const total = Math.max(
+    subtotal + deliveryFee + offersTotal - discountTotal,
+    0
+  );
 
   return {
+    items, // 🔥 ADD THIS
     subtotal,
     deliveryFee,
     offersTotal,
@@ -161,7 +170,6 @@ function calculateOrderTotal(order) {
     amountCents: Math.round(total * 100),
   };
 }
-
 /* ======================
    STRIPE WEBHOOK
 ====================== */
@@ -483,6 +491,7 @@ app.listen(PORT, async () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
   await startupChecks();
 });
+
 
 
 
