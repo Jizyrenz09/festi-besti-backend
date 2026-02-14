@@ -22,7 +22,7 @@ const passwords = {
 // Load submissions from file
 function loadSubmissions() {
   if (!fs.existsSync(DATA_FILE)) return {};
-  return JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+  return .parse(fs.readFileSync(DATA_FILE, "utf8"));
 }
 
 // Save submissions to file
