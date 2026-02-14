@@ -1,21 +1,17 @@
 {
-  "name": "festi-besti-website",
+  "name": "valentine-json-backend",
   "version": "1.0.0",
-  "description": "",
-  "main": "server.js",
+  "description": "Simple JSON backend for Valentine invitation passwords",
+  "main": "valentine-json-backend.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node server.js"
+    "start": "node valentine-json-backend.js"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": ["valentine", "backend", "json"],
+  "author": "Jessy Renz Maroto",
   "license": "ISC",
   "dependencies": {
-    "@getbrevo/brevo": "^3.0.1",
-    "@sendgrid/mail": "^8.1.6",
-    "cors": "^2.8.6",
-    "dotenv": "^17.2.3",
     "express": "^5.2.1",
-    "stripe": "^18.5.0"
+    "cors": "^2.8.6",
+    "body-parser": "^1.20.2"
   }
 }
