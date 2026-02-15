@@ -7,19 +7,27 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// Connect to Render Postgres
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: {postgresql://valentine_json_db_user:r0JFAsP5Z0RVMJvtwx0veaCUdyDS6Vmg@dpg-d68oms7pm1nc7395knmg-a/valentine_json_db } // required on Render
-});
+// PostgreSQL pool
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
-// Default passwords
+// Default passwords (unchanged)
 const passwords = {
   Jerik: "12345",
   Joemar: "121801",
   Dave: "192002",
   Jess: "666666"
 };
+
+// Ensure submissions table exists
+async function initDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS submissions (
+      person VARCHAR(50) PRIMARY KEY,
+      submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+}
+initDB();
 
 // Submit password endpoint
 app.post("/submit-password", async (req, res) => {
@@ -31,12 +39,12 @@ app.post("/submit-password", async (req, res) => {
 
   try {
     await pool.query(
-      "INSERT INTO submissions(person) VALUES($1) ON CONFLICT (person) DO NOTHING",
+      "INSERT INTO submissions (person) VALUES ($1) ON CONFLICT (person) DO NOTHING",
       [person]
     );
 
-    const { rowCount } = await pool.query("SELECT * FROM submissions");
-    const completed = rowCount === 4;
+    const result = await pool.query("SELECT COUNT(*) FROM submissions");
+    const completed = parseInt(result.rows[0].count) === 4;
 
     res.json({ success: true, completed });
   } catch (err) {
@@ -45,11 +53,13 @@ app.post("/submit-password", async (req, res) => {
   }
 });
 
-// Check status endpoint
+// Status endpoint
 app.get("/status", async (req, res) => {
   try {
-    const { rows } = await pool.query("SELECT person FROM submissions");
-    res.json({ submitted: rows.map(r => r.person), completed: rows.length === 4 });
+    const result = await pool.query("SELECT person FROM submissions");
+    const submitted = result.rows.map(r => r.person);
+    const completed = submitted.length === 4;
+    res.json({ submitted, completed });
   } catch (err) {
     console.error(err);
     res.status(500).json({ submitted: [], completed: false });
