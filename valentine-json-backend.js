@@ -1,15 +1,17 @@
 const express = require("express");
-const fs = require("fs");
-const path = require("path");
-const bodyParser = require("body-parser");
 const cors = require("cors");
+const bodyParser = require("body-parser");
+const { Pool } = require("pg");
 
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// JSON file path
-const DATA_FILE = path.join(__dirname, "submissions.json");
+// Connect to Render Postgres
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: {postgresql://valentine_json_db_user:r0JFAsP5Z0RVMJvtwx0veaCUdyDS6Vmg@dpg-d68oms7pm1nc7395knmg-a/valentine_json_db } // required on Render
+});
 
 // Default passwords
 const passwords = {
@@ -19,42 +21,39 @@ const passwords = {
   Jess: "666666"
 };
 
-// Load submissions from file
-function loadSubmissions() {
-  if (!fs.existsSync(DATA_FILE)) return {};
-  try {
-    return JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
-  } catch {
-    return {};
-  }
-}
-
-
-// Save submissions to file
-function saveSubmissions(data) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
-}
-
 // Submit password endpoint
-app.post("/submit-password", (req, res) => {
+app.post("/submit-password", async (req, res) => {
   const { person, password } = req.body;
 
   if (!passwords[person] || passwords[person] !== password) {
     return res.status(400).json({ success: false, message: "Invalid person or password" });
   }
 
-  const submissions = loadSubmissions();
-  submissions[person] = true;
-  saveSubmissions(submissions);
+  try {
+    await pool.query(
+      "INSERT INTO submissions(person) VALUES($1) ON CONFLICT (person) DO NOTHING",
+      [person]
+    );
 
-  const completed = Object.keys(submissions).length === 4;
-  res.json({ success: true, completed });
+    const { rowCount } = await pool.query("SELECT * FROM submissions");
+    const completed = rowCount === 4;
+
+    res.json({ success: true, completed });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
 });
 
 // Check status endpoint
-app.get("/status", (req, res) => {
-  const submissions = loadSubmissions();
-  res.json({ submitted: Object.keys(submissions), completed: Object.keys(submissions).length === 4 });
+app.get("/status", async (req, res) => {
+  try {
+    const { rows } = await pool.query("SELECT person FROM submissions");
+    res.json({ submitted: rows.map(r => r.person), completed: rows.length === 4 });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ submitted: [], completed: false });
+  }
 });
 
 const PORT = process.env.PORT || 3001;
